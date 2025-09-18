@@ -8,6 +8,7 @@ Funzionalità
 4) Chat RAG: ricerca ticket simili + risposta LLM con citazioni ID
 5) Modalità CLI con self-tests quando Streamlit non è disponibile
 6) Pulsante Quit nella sidebar per chiudere l’app dal browser
+7) Se trova data/chroma/chroma.sqlite3, la collezione viene aperta e viene mostrato in sidebar un messaggio verde con il numero di documenti caricati (o “N/A” se non disponibile)
 
 Avvio consigliato
 streamlit run app.py --server.port 8502
@@ -22,9 +23,6 @@ from typing import List, Dict, Any, Optional, Tuple
 import requests
 import pandas as pd
 
-# ------------------------------
-# Streamlit (opzionale per CLI)
-# ------------------------------
 try:
     import streamlit as st  # type: ignore
     ST_AVAILABLE = True
@@ -42,9 +40,6 @@ except Exception:
 
     st = _STShim()  # type: ignore
 
-# ------------------------------
-# Vector store / embeddings
-# ------------------------------
 try:
     import chromadb
     from chromadb.config import Settings as ChromaSettings
@@ -68,17 +63,11 @@ except Exception:
     OpenAI = None  # type: ignore
     print("[DEBUG] openai SDK non disponibile.")
 
-# ------------------------------
-# Costanti
-# ------------------------------
 DEFAULT_CHROMA_DIR = os.path.join("data", "chroma")
 DEFAULT_COLLECTION = "youtrack_tickets"
 DEFAULT_OLLAMA_MODEL = "llama3"
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
-# ------------------------------
-# Data model
-# ------------------------------
 @dataclass
 class YTIssue:
     id_readable: str
@@ -90,9 +79,6 @@ class YTIssue:
         desc = self.description or ""
         return f"[{self.id_readable}] {self.summary}\n\n{desc}"
 
-# ------------------------------
-# YouTrack client
-# ------------------------------
 class YouTrackClient:
     def __init__(self, base_url: str, token: str):
         print(f"[DEBUG] Inizializzazione YouTrackClient con base_url={base_url}")
@@ -138,9 +124,6 @@ class YouTrackClient:
         print(f"[DEBUG] {len(issues)} ticket recuperati.")
         return issues
 
-# ------------------------------
-# Embeddings + VectorStore
-# ------------------------------
 class EmbeddingBackend:
     def __init__(self, use_openai: bool, model_name: str = DEFAULT_EMBEDDING_MODEL):
         print(f"[DEBUG] Inizializzazione EmbeddingBackend, use_openai={use_openai}, model={model_name}")
@@ -151,7 +134,7 @@ class EmbeddingBackend:
         if use_openai:
             if OpenAI is None:
                 raise RuntimeError("openai SDK non installato")
-            api_key = os.getenv("OPENAI_API_KEY")
+            api_key = os.getenv("OPENAI_API_KEY_EXPERIMENTS")
             if not api_key:
                 raise RuntimeError("OPENAI_API_KEY non impostata")
             self.client = OpenAI(api_key=api_key)
@@ -163,14 +146,15 @@ class EmbeddingBackend:
     def embed(self, texts: List[str]) -> List[List[float]]:
         print(f"[DEBUG] embed chiamato su {len(texts)} testi")
         if self.use_openai:
-            try:
-                res = self.client.embeddings.create(model="text-embedding-3-small", input=texts)  # type: ignore
-                return [d.embedding for d in res.data]  # type: ignore
-            except Exception as e:
-                print(f"[DEBUG] Errore embeddings OpenAI: {e}")
-                raise
+            res = self.client.embeddings.create(model="text-embedding-3-small", input=texts)  # type: ignore
+            return [d.embedding for d in res.data]  # type: ignore
         else:
-            return self.local_model.encode(texts, convert_to_numpy=False, show_progress_bar=False)  # type: ignore
+            embs = self.local_model.encode(
+                texts, convert_to_numpy=True, show_progress_bar=False
+            )
+            # Se è un numpy array, converti in lista di liste
+            return embs.tolist()
+
 
 class VectorStore:
     def __init__(self, persist_dir: str = DEFAULT_CHROMA_DIR, collection_name: str = DEFAULT_COLLECTION):
@@ -189,9 +173,12 @@ class VectorStore:
         print(f"[DEBUG] Query VectorStore con n_results={n_results}")
         return self.collection.query(query_embeddings=query_embeddings, n_results=n_results, include=["documents", "metadatas", "distances"])  # type: ignore
 
-# ------------------------------
-# LLM backend
-# ------------------------------
+    def count(self) -> int:
+        try:
+            return self.collection.count()  # type: ignore
+        except Exception:
+            return -1
+
 class LLMBackend:
     def __init__(self, provider: str, model: str, temperature: float = 0.2):
         print(f"[DEBUG] Inizializzazione LLMBackend provider={provider}, model={model}")
@@ -202,7 +189,7 @@ class LLMBackend:
         if provider == "openai":
             if OpenAI is None:
                 raise RuntimeError("openai SDK non installato")
-            api_key = os.getenv("OPENAI_API_KEY")
+            api_key = os.getenv("OPENAI_API_KEY_EXPERIMENTS")
             if not api_key:
                 raise RuntimeError("OPENAI_API_KEY non impostata")
             self.openai_client = OpenAI(api_key=api_key)
@@ -263,9 +250,6 @@ class LLMBackend:
             print("[DEBUG] Provider LLM non supportato")
             return "Provider LLM non supportato"
 
-# ------------------------------
-# Prompting
-# ------------------------------
 RAG_SYSTEM_PROMPT = (
     "Sei un assistente tecnico che risponde basandosi su ticket YouTrack simili. "
     "Cita sempre gli ID dei ticket trovati tra parentesi quadre. Se il contesto non è sufficiente, chiedi chiarimenti."
@@ -283,10 +267,6 @@ def build_prompt(user_ticket: str, retrieved: List[Tuple[str, dict, float]]) -> 
         )
     parts.append("\nIstruzioni: proponi una risposta sintetica e operativa. Includi i riferimenti ai ticket fra [].")
     return "\n\n".join(parts)
-
-# ------------------------------
-# UI Streamlit
-# ------------------------------
 
 def run_streamlit_app() -> None:
     st.set_page_config(page_title="Support RAG for YouTrack", page_icon="🧭", layout="wide")
@@ -387,7 +367,7 @@ def run_streamlit_app() -> None:
                 }
                 for it in st.session_state["issues"]
             ])
-            st.dataframe(df, width=True, hide_index=True)
+            st.dataframe(df, width=st.session_state.get("page_width", 1200))
         else:
             st.caption("Nessun ticket caricato")
 
