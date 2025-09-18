@@ -65,7 +65,7 @@ except Exception:
 
 DEFAULT_CHROMA_DIR = os.path.join("data", "chroma")
 DEFAULT_COLLECTION = "youtrack_tickets"
-DEFAULT_OLLAMA_MODEL = "llama3"
+DEFAULT_OLLAMA_MODEL = "llama3.2"
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
 @dataclass
