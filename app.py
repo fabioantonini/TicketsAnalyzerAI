@@ -170,7 +170,7 @@ class EmbeddingBackend:
                 print(f"[DEBUG] Errore embeddings OpenAI: {e}")
                 raise
         else:
-            return self.local_model.encode(texts, convert_to_numpy=False, show_progress_bar=False).tolist()  # type: ignore
+            return self.local_model.encode(texts, convert_to_numpy=False, show_progress_bar=False)  # type: ignore
 
 class VectorStore:
     def __init__(self, persist_dir: str = DEFAULT_CHROMA_DIR, collection_name: str = DEFAULT_COLLECTION):
@@ -387,7 +387,7 @@ def run_streamlit_app() -> None:
                 }
                 for it in st.session_state["issues"]
             ])
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width=True, hide_index=True)
         else:
             st.caption("Nessun ticket caricato")
 
