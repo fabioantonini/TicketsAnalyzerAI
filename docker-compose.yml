@@ -1,0 +1,13 @@
+version: '3.9'
+
+services:
+  rag-support-app:
+    build: .
+    container_name: rag_support_app
+    ports:
+      - "8501:8501"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

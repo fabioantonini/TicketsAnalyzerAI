@@ -2,8 +2,8 @@
 # Requisiti: pip install requests
 import requests, sys
 
-BASE_URL = "https://fabioantonini.youtrack.cloud/api"
-TOKEN = "perm-YWRtaW4=.NDQtMA==.QJNcVBhDks9awoACXR2127Up24kEem"
+BASE_URL = ""
+TOKEN = ""
 
 HDRS = {
     "Authorization": f"Bearer {TOKEN}",
