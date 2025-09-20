@@ -1,10 +1,10 @@
 # yt_netkb_bootstrap.py
 # Requisiti: pip install requests
 import requests, sys, argparse, time, re, json
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-BASE_URL = "https://fabioantonini.youtrack.cloud/api"
-TOKEN = "perm-YWRtaW4=.NDQtMA==.QJNcVBhDks9awoACXR2127Up24kEem"
+BASE_URL = "https://tuaistanza.youtrack.cloud/api"
+TOKEN = "ybpt_xxx_copia_il_tuo_token_qui"
 
 HDRS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -40,21 +40,18 @@ def create_project(name: str, short_name: str, leader_id: str, dry: bool):
 
 # -------------------- Custom fields & bundles --------------------
 def find_or_create_enum_bundle(name: str, values: List[str], dry: bool) -> Dict:
-    # cerca bundle enum per nome; se non c'è, crea
     bundles = req("GET", "/admin/customFieldSettings/bundles/enum?fields=id,name,values(name)")
     for b in bundles:
         if b["name"] == name:
-            # idempotente: assicura tutti i valori
             current = {v["name"] for v in b.get("values", [])}
             missing = [v for v in values if v not in current]
             if missing and not dry:
-                body = {"values": [{"name": v} for v in values]}
-                req("POST", f"/admin/customFieldSettings/bundles/enum/{b['id']}/values?fields=id,name", json={"name": None})  # NO-OP per creare endpoint
-                # aggiunte una ad una per sicurezza
                 for v in missing:
                     req("POST",
                         f"/admin/customFieldSettings/bundles/enum/{b['id']}/values?fields=id,name",
                         json={"name": v})
+            elif missing and dry:
+                print(f"[DRY] Aggiungerei al bundle {name} i valori mancanti: {missing}")
             return b
     if dry:
         print(f"[DRY] Creerei EnumBundle {name} con valori {values}")
@@ -64,7 +61,6 @@ def find_or_create_enum_bundle(name: str, values: List[str], dry: bool) -> Dict:
     return b
 
 def find_or_create_cf_enum(name: str, bundle_id: str, dry: bool) -> Dict:
-    # cerca CF schema
     cfs = req("GET", "/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)")
     for cf in cfs:
         if cf["name"] == name:
@@ -74,10 +70,9 @@ def find_or_create_cf_enum(name: str, bundle_id: str, dry: bool) -> Dict:
         return {"id": f"DRY-CF-{name}", "name": name}
     body = {
         "name": name,
-        "fieldType": {"id": "enum"},
-        "bundle": {"id": bundle_id}
+        "fieldType": {"id": "enum[1]"}  # tipo corretto per enum
     }
-    return req("POST", "/admin/customFieldSettings/customFields?fields=id,name", json=body)
+    return req("POST", "/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)", json=body)
 
 def find_or_create_cf_text(name: str, cf_type: str, dry: bool) -> Dict:
     # cf_type: "string" o "text"
@@ -91,39 +86,87 @@ def find_or_create_cf_text(name: str, cf_type: str, dry: bool) -> Dict:
     body = {"name": name, "fieldType": {"id": cf_type}}
     return req("POST", "/admin/customFieldSettings/customFields?fields=id,name", json=body)
 
-def ensure_project_cf(project_id: str, cf_id: str, required: bool, dry: bool) -> None:
+# ---- mapping & helpers per ProjectCustomField ----
+def _proj_cf_type_from_fieldtype(fieldtype_id: str) -> str:
+    mapping = {
+        "enum[1]": "EnumProjectCustomField",
+        "enum[*]": "EnumProjectCustomField",
+        "integer": "SimpleProjectCustomField",
+        "float": "SimpleProjectCustomField",
+        "date": "SimpleProjectCustomField",
+        "date and time": "SimpleProjectCustomField",
+        "period": "PeriodProjectCustomField",
+        "string": "SimpleProjectCustomField",
+        "text": "TextProjectCustomField",
+        "user[1]": "UserProjectCustomField",
+        "user[*]": "UserProjectCustomField",
+        "group[1]": "GroupProjectCustomField",
+        "group[*]": "GroupProjectCustomField",
+        "state[1]": "StateProjectCustomField",
+        "version[1]": "VersionProjectCustomField",
+        "version[*]": "VersionProjectCustomField",
+        "ownedField[1]": "OwnedProjectCustomField",
+        "ownedField[*]": "OwnedProjectCustomField",
+        "build[1]": "BuildProjectCustomField",
+        "build[*]": "BuildProjectCustomField",
+    }
+    return mapping.get(fieldtype_id, "SimpleProjectCustomField")
+
+def get_customfield_type_id(cf_id: str) -> str:
+    cf = req("GET", f"/admin/customFieldSettings/customFields/{cf_id}?fields=fieldType(id)")
+    return (cf.get("fieldType") or {}).get("id", "string")
+
+def ensure_project_cf(
+    project_id: str,
+    cf_id: str,
+    required: bool,
+    dry: bool,
+    proj_cf_type: Optional[str] = None,
+    bundle_id: Optional[str] = None
+) -> None:
     """
-    Ensure that a custom field (cf_id) is associated with the given project (project_id).
-    In dry-run mode (or when using a DRY-* fake project id), no API calls are performed.
+    Collega un CustomField al progetto istanziando il ProjectCustomField corretto.
+    Se proj_cf_type è None, viene dedotto dal fieldType del CustomField.
+    Per i campi enum passare bundle_id.
     """
-    # Skip real API calls in dry-run or with fake project id
     if dry or str(project_id).startswith("DRY-"):
-        print(f"[DRY] Assocerei CF {cf_id} al progetto {project_id}")
+        msg = f"[DRY] Assocerei CF {cf_id} al progetto {project_id}"
+        if proj_cf_type:
+            msg += f" come {proj_cf_type}"
+        if bundle_id:
+            msg += f" (bundle {bundle_id})"
+        print(msg)
         return
-    # aggiunge il CF al progetto se assente
-    # Check if the custom field is already linked to the project
+
     fields = req(
         "GET",
-        f"/admin/projects/{project_id}/customFields?fields=id,field(id,name),canBeEmpty,emptyFieldText"
+        f"/admin/projects/{project_id}/customFields?fields=id,field(id,name),$type,bundle(id,name)"
     )
-    for f in fields:
-        field = f.get("field", {})
-        if field.get("id") == cf_id:
-            return  # already present
+    if isinstance(fields, list):
+        for f in fields:
+            if f.get("field", {}).get("id") == cf_id:
+                return  # già presente
 
-    # Link the custom field to the project
+    # deduci $type se non passato
+    if not proj_cf_type:
+        ft_id = get_customfield_type_id(cf_id)  # es: "enum[1]", "string"
+        proj_cf_type = _proj_cf_type_from_fieldtype(ft_id)
+
     body = {
-        "field": {"id": cf_id},
-        "canBeEmpty": not required
+        "$type": proj_cf_type,
+        "field": {"id": cf_id, "$type": "CustomField"},  # <-- importante
+        "canBeEmpty": not required,
     }
+    if bundle_id:
+        body["bundle"] = {"id": bundle_id}
+
     req(
         "POST",
-        f"/admin/projects/{project_id}/customFields?fields=id,field(name)",
+        f"/admin/projects/{project_id}/customFields?fields=id,$type,field(name),bundle(id,name)",
         json=body
     )
 
-
-# -------------------- Issues --------------------
+# -------------------- Issues helpers --------------------
 def fetch_existing_summaries(project_short_name: str) -> set:
     summaries = set()
     skip, top = 0, 100
@@ -145,16 +188,12 @@ def fetch_existing_summaries(project_short_name: str) -> set:
 JSON_REQUIRED_KEYS = {"protocol", "category", "root_cause"}
 
 def has_valid_json_block(description: str) -> bool:
-    # blocco JSON è l'ultima riga (o in coda). Prende l'ultimo { ... } nel testo
-    matches = list(re.finditer(r"\{[\s\S]*\}$", description.strip()))
-    if not matches:
-        # fallback: trova l'ultimo blocco { .. } nel testo
-        matches = list(re.finditer(r"\{[\s\S]*\}", description))
-        if not matches:
-            return False
-    block = matches[-1].group(0)
+    text = description.strip()
+    m = re.search(r"\{[\s\S]*\}\s*$", text)
+    if not m:
+        return False
     try:
-        data = json.loads(block)
+        data = json.loads(m.group(0))
     except Exception:
         return False
     return JSON_REQUIRED_KEYS.issubset(set(map(str, data.keys())))
@@ -169,7 +208,6 @@ def create_issue(project_id: str, summary: str, description: str, custom: Dict, 
         print(f"[DRY] Creerei issue: {summary}")
         return {"id": "DRY-ISSUE-ID", "idReadable": "NETKB-XXX", "summary": summary}
 
-    # Mappa i CF (per semplicità setto per nome)
     cf_payload = []
     for fname, fval in custom.items():
         if fval is None:
@@ -177,7 +215,6 @@ def create_issue(project_id: str, summary: str, description: str, custom: Dict, 
         if isinstance(fval, dict) and fval.get("_type") == "enum":
             cf_payload.append({"name": fname, "value": {"name": fval["name"]}})
         else:
-            # string/text
             cf_payload.append({"name": fname, "value": fval})
 
     payload = {
@@ -188,7 +225,6 @@ def create_issue(project_id: str, summary: str, description: str, custom: Dict, 
     }
     return req("POST", "/issues?fields=id,idReadable,summary", json=payload)
 
-# -------------------- Seed data --------------------
 def case_block(
     titolo: str,
     problema: str,
@@ -226,200 +262,112 @@ def case_block(
     desc.append(json.dumps(json_tail, ensure_ascii=False))
     return titolo, "\n\n".join(desc)
 
+def _slug(s: str) -> str:
+    s = (s or "Unknown").strip().replace(" ", "_")
+    return re.sub(r"[^A-Za-z0-9_]+", "", s)[:48] or "Unknown"
+
+def add_case_to(
+    cases: List[Dict],
+    summary: str,
+    cat: str, proto: str, sev: str, vendor: str, dev: str, osver: str,
+    problema: str, contesto: str,
+    sintomi: List[str], evid: List[str], analisi: str, root: str,
+    fix: List[str], cmds: List[str], verify: List[str], lessons: List[str], kws: List[str],
+    js: Optional[Dict] = None
+):
+    if js is None:
+        js = {
+            "protocol": proto if proto and proto != "Altro" else "IP",
+            "category": cat or "Routing",
+            "root_cause": _slug(root),
+            "fix_type": _slug(fix[0]) if fix else "Manual_Fix",
+            "checks": (sintomi or evid or []),
+            "commands": cmds or [],
+            "env": {"vendor": vendor or "Altro", "device": dev or "n/a", "os": osver or "n/a"},
+            "keywords": kws or []
+        }
+    t, d = case_block(summary, problema, contesto, sintomi, evid, analisi, root, fix, cmds, verify, lessons, kws, js)
+    cases.append({
+        "summary": t,
+        "description": d,
+        "custom": {
+            "Categoria": {"_type": "enum", "name": cat},
+            "Protocollo": {"_type": "enum", "name": proto},
+            "Severità": {"_type": "enum", "name": sev},
+            "Vendor": {"_type": "enum", "name": vendor},
+            "Dispositivo": dev,
+            "Versione/OS": osver
+        }
+    })
+
+# -------------------- Seed data (28 casi) --------------------
 def seed_cases() -> List[Dict]:
-    cases = []
+    cases: List[Dict] = []
 
-    # 1) OSPF MTU mismatch
-    title, desc = case_block(
-        "OSPF non va in FULL su link p2p: MTU mismatch (1500↔1400), workaround mtu-ignore",
-        problema="Adiacenza OSPF bloccata in EXSTART/EXCHANGE dopo cambio su link p2p.",
-        contesto="Area 0, A=Linux/FRR (eth1), B=Cisco IOS (Gi0/0); overlay GRE.",
-        sintomi=["Neighbor oscillante EXSTART/EXCHANGE", "LSDB non sincronizzata"],
-        evidenze=["FRR: 'MTU mismatch' su DBD", "Cisco: show ip ospf interface -> MTU 1400", "A ha MTU 1500", "Ping DF 1472 fallisce"],
-        analisi="DBD rifiutati per MTU diversa; overlay riduce MTU effettiva.",
-        root="MTU mismatch sul link p2p.",
-        soluzione=["Allineato MTU a 1400 su entrambe", "Workaround temporaneo: ip ospf mtu-ignore su entrambe"],
-        comandi=[
-            "Linux/FRR: ip link set dev eth1 mtu 1400",
-            "Cisco IOS: interface Gi0/0 ; mtu 1400 ; ip ospf mtu-ignore"
-        ],
-        verifica=["Neighbor FULL; DBD completi", "Ping DF size 1372 ok"],
-        lezioni=["Standard MTU per link con overlay", "Evitare mtu-ignore in esercizio"],
-        keywords=["ospf","exstart","exchange","mtu mismatch","mtu-ignore","dbd","gre","p2p"],
-        json_tail={
-            "protocol": "OSPF",
-            "category": "Routing",
-            "root_cause": "MTU_mismatch",
-            "fix_type": "MTU_align",
-            "checks": ["show ip ospf interface", "ping DF MTU-28"],
-            "commands": ["ip link set dev eth1 mtu 1400", "ip ospf mtu-ignore"],
-            "env": {"vendorA": "Linux/FRR", "vendorB": "Cisco IOS", "overlay": "GRE"},
-            "keywords": ["ospf","exstart","exchange","mtu mismatch","mtu-ignore","dbd","gre","p2p"]
+    add_case_to(cases, "OSPF non va in FULL su link p2p: MTU mismatch (1500↔1400), workaround mtu-ignore",
+        "Routing","OSPF","Media","Cisco","Router A/B","IOS 15.x / FRR 9.x",
+        "Adiacenza OSPF bloccata in EXSTART/EXCHANGE dopo cambio su link p2p.",
+        "Area 0, A=Linux/FRR (eth1), B=Cisco IOS (Gi0/0); overlay GRE.",
+        ["Neighbor EXSTART/EXCHANGE","LSDB non sincronizzata"],
+        ["FRR: 'MTU mismatch'","Cisco: MTU 1400, lato A 1500","Ping DF 1472 fallisce"],
+        "DBD rifiutati per MTU diversa; overlay riduce MTU effettiva.",
+        "MTU mismatch sul link p2p.",
+        ["Allineato MTU 1400 su entrambi","Workaround: ip ospf mtu-ignore su entrambe"],
+        ["ip link set dev eth1 mtu 1400","interface Gi0/0 ; mtu 1400 ; ip ospf mtu-ignore"],
+        ["Neighbor FULL","Ping DF size 1372 ok"],
+        ["Standard MTU per link con overlay","Evitare mtu-ignore in esercizio"],
+        ["ospf","exstart","exchange","mtu mismatch","mtu-ignore","dbd","gre","p2p"],
+        {
+            "protocol":"OSPF","category":"Routing","root_cause":"MTU_mismatch","fix_type":"MTU_align",
+            "checks":["show ip ospf interface","ping DF 1372"],
+            "commands":["mtu 1400","ip ospf mtu-ignore"],
+            "env":{"vendorA":"Linux/FRR","vendorB":"Cisco IOS","overlay":"GRE"},
+            "keywords":["ospf","exstart","exchange","mtu mismatch","mtu-ignore","dbd","gre","p2p"]
         }
     )
-    cases.append({
-        "summary": title,
-        "description": desc,
-        "custom": {
-            "Categoria": {"_type":"enum","name":"Routing"},
-            "Protocollo": {"_type":"enum","name":"OSPF"},
-            "Severità": {"_type":"enum","name":"Media"},
-            "Vendor": {"_type":"enum","name":"Cisco"},
-            "Dispositivo": "Router A/B",
-            "Versione/OS": "IOS 15.x / FRR 9.x"
-        }
-    })
 
-    # 2) PPPoE MTU/MSS/PMTUD
-    title, desc = case_block(
-        "WAN PPPoE lenta e loss: MTU 1500 su PPPoE, PMTUD bloccato, MSS non clampato",
-        "Packet loss 10–25% e stall TCP su PPPoE dopo migrazione.",
-        "Edge Linux PPPoE VLAN 835; servizi IPsec/HTTPS/VoIP impattati.",
-        ["Download bloccati >1MB", "VoIP jitter alto", "Ping DF 1472 fallisce"],
-        ["MTU ppp0=1500", "Firewall blocca ICMP 3:4", "MSS eccessivo in SYN"],
-        "PPPoe richiede MTU/MRU 1492; ICMP fragmentation-needed va permesso; MSS clamp.",
+    add_case_to(cases, "WAN PPPoE lenta e loss: MTU 1500 su PPPoE, PMTUD bloccato, MSS non clampato",
+        "WAN","Altro","Alta","Linux/FRR","edge-router","Linux 5.x",
+        "Loss 10–25% e stall TCP su PPPoE dopo migrazione.",
+        "PPPoE VLAN 835; IPsec/HTTPS/VoIP impattati.",
+        ["Download >1MB si bloccano","VoIP jitter alto","Ping DF 1472 fallisce"],
+        ["MTU ppp0=1500","ICMP 3:4 bloccato","MSS eccessivo"],
+        "PPPoe richiede MTU/MRU 1492; permettere ICMP fragmentation-needed; MSS clamp.",
         "MTU errata + ICMP 3:4 bloccato + MSS non clampato.",
-        ["Set MTU ppp0 1492", "Permesso ICMP 3:4", "TCP MSS clamp 1452"],
-        [
-            "ip link set dev ppp0 mtu 1492",
-            "iptables -t mangle -A FORWARD -o ppp0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
-        ],
-        ["Ping DF 1472 ok", "Throughput ripristinato", "MOS>4"],
-        ["Standard PPPoE: MTU 1492, MSS clamp default", "Non bloccare ICMP 3:4"],
-        ["pppoe","mtu 1492","mss 1452","pmtud","icmp 3:4","vlan 835"],
-        {
-            "protocol":"IP",
-            "category":"WAN",
-            "root_cause":"MTU_MSS_PMUTD_combo",
-            "fix_type":"MTU_1492_MSS_clamp",
-            "checks":["ping DF 1472","show interface ppp0 mtu","firewall logs ICMP 3:4"],
-            "commands":["ip link set ppp0 mtu 1492","iptables TCPMSS clamp-to-pmtu"],
-            "env":{"access":"FTTC PPPoE","vlan":"835"},
-            "keywords":["pppoe","mtu","mss","pmtud","icmp fragmentation-needed"]
-        }
-    )
-    cases.append({
-        "summary": title,
-        "description": desc,
-        "custom": {
-            "Categoria": {"_type":"enum","name":"WAN"},
-            "Protocollo": {"_type":"enum","name":"Altro"},
-            "Severità": {"_type":"enum","name":"Alta"},
-            "Vendor": {"_type":"enum","name":"Linux/FRR"},
-            "Dispositivo": "edge-router",
-            "Versione/OS": "Linux 5.x"
-        }
-    })
+        ["Set MTU 1492","Permesso ICMP 3:4","MSS clamp 1452"],
+        ["ip link set ppp0 mtu 1492","iptables -t mangle ... TCPMSS --clamp-mss-to-pmtu"],
+        ["Ping DF 1472 ok","Throughput ripristinato"],
+        ["Standard PPPoE: MTU 1492 + MSS clamp","Non bloccare ICMP 3:4"],
+        ["pppoe","mtu 1492","mss 1452","pmtud","icmp 3:4","vlan 835"], None)
 
-    # 3) SIP ALG one-way audio
-    title, desc = case_block(
-        "VoIP one-way audio con SBC esterno: SIP ALG riscrive SDP/RTP",
-        "Audio monodirezionale su chiamate SIP dopo nuovo firewall.",
-        "PBX on-prem + SBC cloud; firewall con SIP ALG attivo.",
-        ["Chiamate con audio in una sola direzione", "Porte RTP errate nei trace"],
-        ["SDP riscritti dall'ALG", "NAT traversal duplicato"],
-        "ALG interferisce con SBC che già gestisce NAT traversal.",
+    add_case_to(cases, "VoIP one-way audio con SBC esterno: SIP ALG riscrive SDP/RTP",
+        "VoIP","SIP","Alta","Altro","firewall","n/a",
+        "Audio monodirezionale dopo nuovo firewall.",
+        "PBX on-prem + SBC cloud; SIP ALG attivo.",
+        ["Audio in una sola direzione","Porte RTP errate"],
+        ["SDP riscritti dall'ALG","NAT traversal duplicato"],
+        "ALG interferisce con SBC.",
         "SIP ALG attivo causa porta/indirizzo RTP errati.",
-        ["Disabilitato SIP ALG", "Aperto range RTP necessario", "Pin-hole gestiti dallo SBC"],
-        [
-            "set firewall sip alg disable",
-            "permit udp 10000-20000"
-        ],
-        ["Audio bidirezionale ripristinato", "Nessun rewrite SDP"],
-        ["Evitare ALG quando esiste SBC", "Documentare range RTP"],
-        ["sip alg","one-way audio","rtp","sdp","sbc","nat traversal"],
-        {
-            "protocol":"SIP",
-            "category":"VoIP",
-            "root_cause":"ALG_interference",
-            "fix_type":"Disable_ALG_open_RTP",
-            "checks":["pcap sdp","inspect firewall ALG"],
-            "commands":["no sip alg","permit udp rtp-range"],
-            "env":{"pbx":"on-prem","sbc":"cloud"},
-            "keywords":["sip","alg","rtp","sdp","one-way"]
-        }
-    )
-    cases.append({
-        "summary": title,
-        "description": desc,
-        "custom": {
-            "Categoria": {"_type":"enum","name":"VoIP"},
-            "Protocollo": {"_type":"enum","name":"SIP"},
-            "Severità": {"_type":"enum","name":"Alta"},
-            "Vendor": {"_type":"enum","name":"Altro"},
-            "Dispositivo": "firewall",
-            "Versione/OS": "n/a"
-        }
-    })
+        ["Disabilitato SIP ALG","Aperto range RTP necessario"],
+        ["no sip alg","permit udp 10000-20000"],
+        ["Audio bidirezionale ripristinato"],
+        ["Evitare ALG con SBC presente","Documentare range RTP"],
+        ["sip alg","one-way audio","rtp","sdp","sbc","nat traversal"], None)
 
-    # (Aggiungo altri 21 casi sintetici ma completi)
-    def add_case(
-        summary: str,
-        cat: str, proto: str, sev: str, vendor: str, dev: str, osver: str,
-        problema: str, contesto: str,
-        sintomi: list, evid: list, analisi: str, root: str,
-        fix: list, cmds: list, verify: list, lessons: list, kws: list,
-        js: dict = None
-    ):
-        # Se il blocco JSON non è passato, costruiamone uno minimale ma coerente
-        def _slug(s: str) -> str:
-            import re as _re
-            s = s.strip() or "Unknown"
-            s = s.replace(" ", "_")
-            s = _re.sub(r"[^A-Za-z0-9_]+", "", s)
-            return (s or "Unknown")[:48]
-
-        if js is None:
-            js = {
-                "protocol": proto if proto and proto != "Altro" else "IP",
-                "category": cat or "Routing",
-                "root_cause": _slug(root),
-                "fix_type": _slug(fix[0]) if fix else "Manual_Fix",
-                "checks": sintomi if sintomi else (evid if evid else []),
-                "commands": cmds or [],
-                "env": {"vendor": vendor or "Altro", "device": dev or "n/a", "os": osver or "n/a"},
-                "keywords": kws or []
-            }
-
-        t, d = case_block(
-            summary, problema, contesto, sintomi, evid, analisi, root, fix, cmds, verify, lessons, kws, js
-        )
-        cases.append({
-            "summary": t,
-            "description": d,
-            "custom": {
-                "Categoria": {"_type": "enum", "name": cat},
-                "Protocollo": {"_type": "enum", "name": proto},
-                "Severità": {"_type": "enum", "name": sev},
-                "Vendor": {"_type": "enum", "name": vendor},
-                "Dispositivo": dev,
-                "Versione/OS": osver
-            }
-        })
-
-
-    add_case(
-        "DHCP relay ignora richieste: manca Option 82 richiesta dal server",
+    add_case_to(cases, "DHCP relay ignora richieste: manca Option 82 richiesta dal server",
         "DNS/DHCP","DHCP","Media","Cisco","Switch L3","IOS 15.x",
         "Client non ottengono IP su VLAN access.",
         "Relay centralizzato; server valida Circuit-ID/Remote-ID.",
-        ["DISCOVER parte, nessun OFFER","Log server: richiede Option 82"],
+        ["DISCOVER senza OFFER","Server richiede Option 82"],
         ["Sniffer conferma DISCOVER senza Option 82"],
         "Server scarta senza Option 82.",
         "Abilitata insert-option 82 e pass-through hop-count.",
         ["ip dhcp relay information option","ip dhcp relay information trust-all"],
-        ["Lease assegnati, T1/T2 ok"],
+        ["Lease assegnati"],
         ["Standardizzare Option 82"],
-        ["dhcp","option 82","relay"],
-        {
-            "protocol":"DHCP","category":"DNS/DHCP","root_cause":"Missing_Option82",
-            "fix_type":"Enable_Option82","checks":["pcap dhcp","server logs"],
-            "commands":["dhcp relay information option"],"env":{"topo":"L3 access"},
-            "keywords":["dhcp","relay","option 82"]
-        }
-    )
-    add_case(
-        "OSPF su access: mancato passive-interface espone reti di accesso",
+        ["dhcp","option 82","relay"], None)
+
+    add_case_to(cases, "OSPF su access: mancato passive-interface espone reti di accesso",
         "Routing","OSPF","Bassa","Cisco","Switch L3","IOS 15.x",
         "Adiacenze inattese su porte access.",
         "Area 10 su switch L3.",
@@ -430,28 +378,22 @@ def seed_cases() -> List[Dict]:
         ["router ospf X","passive-interface default","no passive-interface Gi0/1"],
         ["Nessuna adiacenza su access"],
         ["Usare passive-interface default"],
-        ["ospf","passive-interface","hardening"],
-        {"protocol":"OSPF","category":"Routing","root_cause":"Hardening_missing","fix_type":"Passive_Interface_Default",
-         "checks":["show ip ospf interface"],"commands":["passive-interface default"],"env":{},"keywords":["ospf","passive"]}
-    )
-    add_case(
-        "BGP flapping: hold-time troppo basso e dampening aggressivo",
+        ["ospf","passive-interface","hardening"], None)
+
+    add_case_to(cases, "BGP flapping: hold-time troppo basso e dampening aggressivo",
         "Routing","BGP","Alta","Cisco","Router edge","IOS XE 17.x",
         "Sessione eBGP instabile ogni 30s.",
         "Peer ISP con timers 1/3s.",
         ["ADJCHANGE Idle/Established frequente"],
-        ["show ip bgp summary","timers keepalive 10 hold 30"],
+        ["bgp summary, timers 1/3"],
         "Keepalive/hold inadeguati; dampening penalizza prefissi.",
-        "Timers 10/30; disabilitato dampening su prefissi critici.",
+        "Timers 10/30 e no dampening su prefissi critici.",
         ["neighbor x timers 10 30","no bgp dampening su prefissi business"],
-        ["Sessione stabile, flap <1/h"],
+        ["Sessione stabile"],
         ["Concordare timers standard con ISP"],
-        ["bgp","timers","dampening"],
-        {"protocol":"BGP","category":"Routing","root_cause":"Aggressive_Timers","fix_type":"Timers_Normalize",
-         "checks":["bgp summary"],"commands":["neighbor timers 10 30"],"env":{},"keywords":["bgp","timers"]}
-    )
-    add_case(
-        "STP loop: PortFast senza BPDU Guard su presa utente con mini-switch",
+        ["bgp","timers","dampening"], None)
+
+    add_case_to(cases, "STP loop: PortFast senza BPDU Guard su presa utente con mini-switch",
         "Switching","STP","Alta","Cisco","Access switch","IOS 15.x",
         "Tempeste broadcast e rete lenta.",
         "Mini-switch utente crea loop su due prese.",
@@ -462,13 +404,10 @@ def seed_cases() -> List[Dict]:
         ["spanning-tree portfast","spanning-tree bpduguard enable"],
         ["Nessun loop successivo"],
         ["Attivare bpduguard di default su access"],
-        ["stp","portfast","bpduguard","loop"],
-        {"protocol":"STP","category":"Switching","root_cause":"No_BPDU_Guard","fix_type":"Enable_BPDU_Guard",
-         "checks":["stp detail"],"commands":["bpduguard enable"],"env":{},"keywords":["stp","bpduguard"]}
-    )
-    add_case(
-        "VLAN Native mismatch su trunk 802.1Q causa perdita traffico",
-        "Switching","Altro","Media","Cisco","Switch agg","IOS 15.x",
+        ["stp","portfast","bpduguard","loop"], None)
+
+    add_case_to(cases, "VLAN Native mismatch su trunk 802.1Q causa perdita traffico",
+        "Switching","802.1Q","Media","Cisco","Switch agg","IOS 15.x",
         "Pacchetti persi su VLAN utente.",
         "Trunk tra vendor diversi.",
         ["LLDP/CDP warning native mismatch"],
@@ -478,13 +417,10 @@ def seed_cases() -> List[Dict]:
         ["switchport trunk native vlan 10","vlan dot1q tag native"],
         ["Traffico ristabilito"],
         ["Evitare VLAN1 come native"],
-        ["vlan","trunk","native mismatch"],
-        {"protocol":"802.1Q","category":"Switching","root_cause":"Native_Mismatch","fix_type":"Align_Native",
-         "checks":["trunk status"],"commands":["native vlan 10"],"env":{},"keywords":["vlan","native"]}
-    )
-    add_case(
-        "IPsec site-to-site dietro NAT: NAT-T disabilitato",
-        "Security","IPsec","Alta","Altro","Firewall","n/a",
+        ["vlan","trunk","native mismatch"], None)
+
+    add_case_to(cases, "IPsec site-to-site dietro NAT: NAT-T disabilitato",
+        "VPN","IPsec","Alta","Altro","Firewall","n/a",
         "Tunnel non sale / instabile.",
         "Firewall NAT intermedio.",
         ["ESP bloccato; solo IKE/500 visibile"],
@@ -494,12 +430,9 @@ def seed_cases() -> List[Dict]:
         ["crypto isakmp nat-traversal 20","permit udp 500 4500"],
         ["SA stabili"],
         ["Verificare sempre NAT-T con NAT in path"],
-        ["ipsec","nat-t","udp 4500"],
-        {"protocol":"IPsec","category":"VPN","root_cause":"NAT_T_off","fix_type":"Enable_NAT_T",
-         "checks":["ike logs"],"commands":["enable nat-t"],"env":{},"keywords":["ipsec","nat-t"]}
-    )
-    add_case(
-        "QoS errata: shaper applicato in ingresso invece che in uscita",
+        ["ipsec","nat-t","udp 4500"], None)
+
+    add_case_to(cases, "QoS errata: shaper applicato in ingresso invece che in uscita",
         "QoS","Altro","Media","Altro","Edge router","Linux",
         "Jitter VoIP e upload saturato.",
         "Link 100/20 con code HFSC.",
@@ -510,28 +443,22 @@ def seed_cases() -> List[Dict]:
         ["tc qdisc add dev ppp0 root ...","class EF/AF"],
         ["MOS>4 stabile"],
         ["Controllare sempre direction"],
-        ["qos","hfsc","egress"],
-        {"protocol":"QoS","category":"QoS","root_cause":"Wrong_Direction","fix_type":"Fix_Egress",
-         "checks":["qdisc stats"],"commands":["tc qdisc ..."],"env":{},"keywords":["qos","egress"]}
-    )
-    add_case(
-        "NTP offset causa fallimenti Kerberos: UDP/123 bloccato",
+        ["qos","hfsc","egress"], None)
+
+    add_case_to(cases, "NTP offset causa fallimenti Kerberos: UDP/123 bloccato",
         "Security","NTP","Media","Linux/FRR","Server","Linux",
         "Ticket TGT rifiutati, clock skew.",
         "Join AD; firewall restrittivo.",
         ["ntpq -p no-reach","kinit skew"],
-        ["fw logs udp/123 drop"],
+        ["fw drop udp/123"],
         "NTP non sincronizzato.",
         "Aperto UDP 123 verso pool; fallback interno.",
         ["ufw allow 123/udp","timesyncd iburst"],
         ["Offset < 50ms; Kerberos ok"],
         ["Monitorare NTP su host critici"],
-        ["ntp","kerberos","skew"],
-        {"protocol":"NTP","category":"Security","root_cause":"NTP_Blocked","fix_type":"Allow_UDP_123",
-         "checks":["ntpq -p"],"commands":["allow 123/udp"],"env":{},"keywords":["ntp","kerberos"]}
-    )
-    add_case(
-        "Port-channel instabile: LACP rate e hash non coerenti",
+        ["ntp","kerberos","skew"], None)
+
+    add_case_to(cases, "Port-channel instabile: LACP rate e hash non coerenti",
         "Switching","LACP","Media","Cisco","Core/Agg","IOS XE",
         "Flap e micro-outage.",
         "Bundle 2x10G.",
@@ -542,12 +469,9 @@ def seed_cases() -> List[Dict]:
         ["lacp rate fast","port-channel load-balance src-dst-ip"],
         ["Bundle stabile"],
         ["Standardizzare parametri LACP"],
-        ["lacp","hashing","port-channel"],
-        {"protocol":"LACP","category":"Switching","root_cause":"Mismatch_Params","fix_type":"Align_Params",
-         "checks":["etherchannel sum"],"commands":["lacp rate fast"],"env":{},"keywords":["lacp","hash"]}
-    )
-    add_case(
-        "VRRP flap con CPU alta: preempt troppo aggressivo",
+        ["lacp","hashing","port-channel"], None)
+
+    add_case_to(cases, "VRRP flap con CPU alta: preempt troppo aggressivo",
         "Routing","Altro","Media","Cisco","Gateway","IOS",
         "Gateway master cambia spesso.",
         "HA VRRP.",
@@ -558,12 +482,9 @@ def seed_cases() -> List[Dict]:
         ["vrrp preempt delay 60","priority 110 vs 80","track Gi0/1"],
         ["Stabilità ripristinata"],
         ["Hardening VRRP"],
-        ["vrrp","preempt","priority"],
-        {"protocol":"VRRP","category":"Routing","root_cause":"Aggressive_Preempt","fix_type":"Tune_Preempt",
-         "checks":["vrrp logs"],"commands":["preempt delay"],"env":{},"keywords":["vrrp","preempt"]}
-    )
-    add_case(
-        "LLDP disabilitato: telefoni non entrano in voice VLAN",
+        ["vrrp","preempt","priority"], None)
+
+    add_case_to(cases, "LLDP disabilitato: telefoni non entrano in voice VLAN",
         "Switching","LLDP","Bassa","Cisco","Access switch","IOS",
         "Phone finiscono in VLAN dati.",
         "Auto-VLAN richiede LLDP-MED.",
@@ -574,12 +495,9 @@ def seed_cases() -> List[Dict]:
         ["lldp run","lldp med-tlv-select network-policy voice"],
         ["Phone in VLAN voce"],
         ["Abilitare LLDP/LLDP-MED"],
-        ["lldp","voice vlan","med"],
-        {"protocol":"LLDP","category":"Switching","root_cause":"LLDP_Off","fix_type":"Enable_LLDP",
-         "checks":["lldp neighbors"],"commands":["lldp run"],"env":{},"keywords":["lldp","voice"]}
-    )
-    add_case(
-        "DNS ricorsivo lento: forwarder bloccato e cache TTL basso",
+        ["lldp","voice vlan","med"], None)
+
+    add_case_to(cases, "DNS ricorsivo lento: forwarder bloccato e cache TTL basso",
         "DNS/DHCP","DNS","Media","Linux/FRR","Resolver","bind9",
         "Lookups lenti / SERVFAIL sporadici.",
         "Firewall outbound restrittivo.",
@@ -590,12 +508,9 @@ def seed_cases() -> List[Dict]:
         ["ufw allow 53","named.conf: forwarders {...}; max-cache-ttl 86400;"],
         ["Latency <50ms; cache hit >80%"],
         ["Aggiornare forwarder autorizzati"],
-        ["dns","forwarder","ttl"],
-        {"protocol":"DNS","category":"DNS/DHCP","root_cause":"FW_Block_53","fix_type":"Allow_53_and_Tune_TTL",
-         "checks":["dig +trace"],"commands":["allow 53"],"env":{},"keywords":["dns","forwarder"]}
-    )
-    add_case(
-        "RADIUS accounting intermittente: UDP/1813 non permesso",
+        ["dns","forwarder","ttl"], None)
+
+    add_case_to(cases, "RADIUS accounting intermittente: UDP/1813 non permesso",
         "Security","Altro","Media","Altro","WLC/RADIUS","n/a",
         "Sessioni non contabilizzate.",
         "WLAN enterprise con accounting.",
@@ -606,12 +521,9 @@ def seed_cases() -> List[Dict]:
         ["permit udp 1812 1813","radius-server retransmit 3"],
         ["Accounting affidabile"],
         ["Validare sempre le porte AAA"],
-        ["radius","accounting","1813"],
-        {"protocol":"RADIUS","category":"Security","root_cause":"Port_1813_Blocked","fix_type":"Allow_1813",
-         "checks":["server logs"],"commands":["permit 1813"],"env":{},"keywords":["radius","1813"]}
-    )
-    add_case(
-        "Static route recursive fail: next-hop non risolvibile",
+        ["radius","accounting","1813"], None)
+
+    add_case_to(cases, "Static route recursive fail: next-hop non risolvibile",
         "Routing","Altro","Media","Linux/FRR","Router","FRR 9.x",
         "Blackhole su rotte statiche.",
         "Next-hop fuori subnet.",
@@ -621,14 +533,11 @@ def seed_cases() -> List[Dict]:
         "Aggiunta route intermedia o interfaccia d’uscita.",
         ["ip route add ... via ... dev X"],
         ["Connettività ripristinata"],
-        ["Verificare sempre reachability next-hop"],
-        ["static route","recursive","arp"],
-        {"protocol":"IP","category":"Routing","root_cause":"NextHop_Unreachable","fix_type":"Add_Intermediate_Route",
-         "checks":["arp","route show"],"commands":["ip route add"],"env":{},"keywords":["static","recursive"]}
-    )
-    add_case(
-        "AnyConnect split-tunnel: MTU eccessiva, SaaS si blocca",
-        "VPN","Altro","Media","Cisco","ASA/FTD","ASA 9.x",
+        ["Verificare reachability next-hop"],
+        ["static route","recursive","arp"], None)
+
+    add_case_to(cases, "AnyConnect split-tunnel: MTU eccessiva, SaaS si blocca",
+        "VPN","SSL","Media","Cisco","ASA/FTD","ASA 9.x",
         "Applicazioni SaaS lente/irraggiungibili.",
         "SSL VPN split-tunnel, PMTUD bloccato.",
         ["Stalli su payload grandi"],
@@ -638,12 +547,9 @@ def seed_cases() -> List[Dict]:
         ["sysopt connection tcpmss 1350","tunnel-group MTU 1400"],
         ["SaaS ok"],
         ["Definire MTU per SSL VPN"],
-        ["ssl vpn","mtu","mss","pmtud"],
-        {"protocol":"SSL","category":"VPN","root_cause":"Tunnel_MTU_Too_High","fix_type":"Lower_MTU_MSS",
-         "checks":["ping df","path mtu"],"commands":["tcpmss 1350"],"env":{},"keywords":["ssl","mtu"]}
-    )
-    add_case(
-        "WireGuard dietro CGNAT: assenza keepalive porta a drop",
+        ["ssl vpn","mtu","mss","pmtud"], None)
+
+    add_case_to(cases, "WireGuard dietro CGNAT: assenza keepalive porta a drop",
         "VPN","WireGuard","Bassa","Linux/FRR","WG peer","Linux",
         "Tunnel si interrompe dopo inattività.",
         "Peer mobile CGNAT.",
@@ -654,12 +560,9 @@ def seed_cases() -> List[Dict]:
         ["PersistentKeepalive=25"],
         ["Tunnel stabile"],
         ["Impostare keepalive per NAT"],
-        ["wireguard","keepalive","cgnat"],
-        {"protocol":"WireGuard","category":"VPN","root_cause":"No_Keepalive","fix_type":"Enable_Keepalive",
-         "checks":["wg show"],"commands":["PersistentKeepalive=25"],"env":{},"keywords":["wireguard","keepalive"]}
-    )
-    add_case(
-        "GRE over IPsec: payload grandi in blackhole (PMTUD rotto)",
+        ["wireguard","keepalive","cgnat"], None)
+
+    add_case_to(cases, "GRE over IPsec: payload grandi in blackhole (PMTUD rotto)",
         "Routing","GRE","Media","Cisco","Router","IOS",
         "Ping piccoli ok, grandi no.",
         "GRE sopra IPsec.",
@@ -670,12 +573,9 @@ def seed_cases() -> List[Dict]:
         ["interface Tunnel0 ; ip mtu 1400","ip tcp adjust-mss 1360"],
         ["Traffico stabile"],
         ["Test PMTUD dopo change"],
-        ["gre","ipsec","mtu","pmtud"],
-        {"protocol":"GRE","category":"Routing","root_cause":"PMTUD_Blocked","fix_type":"Clamp_MSS_Set_Tunnel_MTU",
-         "checks":["ping df"],"commands":["ip mtu 1400","mss 1360"],"env":{},"keywords":["gre","mtu"]}
-    )
-    add_case(
-        "Asymmetric routing: firewall stateful droppa i ritorni",
+        ["gre","ipsec","mtu","pmtud"], None)
+
+    add_case_to(cases, "Asymmetric routing: firewall stateful droppa i ritorni",
         "Security","Altro","Media","Altro","Firewall","n/a",
         "TCP reset/timeout su alcune sessioni.",
         "Due uplink ECMP.",
@@ -686,12 +586,9 @@ def seed_cases() -> List[Dict]:
         ["policy-based routing","disable state per subnet note"],
         ["Connessioni stabili"],
         ["Evitare asimmetria con stateful"],
-        ["ecmp","stateful","pbr"],
-        {"protocol":"IP","category":"Security","root_cause":"Asymmetric_Path","fix_type":"Sticky_PBR_or_State_Bypass",
-         "checks":["conn table"],"commands":["pbr stickiness"],"env":{},"keywords":["ecmp","stateful"]}
-    )
-    add_case(
-        "MPLS LDP non sale: TCP/646 filtrato nel core",
+        ["ecmp","stateful","pbr"], None)
+
+    add_case_to(cases, "MPLS LDP non sale: TCP/646 filtrato nel core",
         "Routing","MPLS","Alta","Cisco","Core","IOS XR",
         "Niente label binding (solo IGP up).",
         "Core MPLS v4.",
@@ -702,13 +599,10 @@ def seed_cases() -> List[Dict]:
         ["permit tcp 646"],
         ["LDP up, label distribuite"],
         ["Validare porte LDP"],
-        ["mpls","ldp","tcp 646"],
-        {"protocol":"MPLS","category":"Routing","root_cause":"TCP646_Blocked","fix_type":"Allow_646",
-         "checks":["ldp logs"],"commands":["allow 646"],"env":{},"keywords":["mpls","ldp"]}
-    )
-    add_case(
-        "BFD non parte: min-tx/rx troppo bassi per la piattaforma",
-        "Routing","Altro","Bassa","Cisco","WAN","IOS XE",
+        ["mpls","ldp","tcp 646"], None)
+
+    add_case_to(cases, "BFD non parte: min-tx/rx troppo bassi per la piattaforma",
+        "Routing","BFD","Bassa","Cisco","WAN","IOS XE",
         "Sessione BFD down.",
         "Link WAN ad alta latenza.",
         ["diag: control packet too slow"],
@@ -718,13 +612,10 @@ def seed_cases() -> List[Dict]:
         ["bfd interval 300 min_rx 300 multiplier 3"],
         ["BFD up"],
         ["Timer in linea con piattaforma"],
-        ["bfd","timers"],
-        {"protocol":"BFD","category":"Routing","root_cause":"Timers_Too_Aggressive","fix_type":"Relax_Timers",
-         "checks":["bfd logs"],"commands":["interval 300"],"env":{},"keywords":["bfd"]}
-    )
-    add_case(
-        "IPv6 RA-guard blocca SLAAC legittimo dopo upgrade",
-        "LAN","Altro","Media","Cisco","Access","IOS",
+        ["bfd","timers"], None)
+
+    add_case_to(cases, "IPv6 RA-guard blocca SLAAC legittimo dopo upgrade",
+        "LAN","IPv6","Media","Cisco","Access","IOS",
         "Client senza IPv6.",
         "RA-guard su access.",
         ["Drops su RA guard","MAC gw non whitelisted"],
@@ -734,12 +625,9 @@ def seed_cases() -> List[Dict]:
         ["ipv6 nd raguard policy ..."],
         ["SLAAC ok"],
         ["Rivedere RA-guard dopo upgrade"],
-        ["ipv6","ra-guard","slaac"],
-        {"protocol":"IPv6","category":"LAN","root_cause":"RA_Guard_Profile_Stale","fix_type":"Update_Profile",
-         "checks":["ra guard counters"],"commands":["permit uplink"],"env":{},"keywords":["ipv6","raguard"]}
-    )
-    add_case(
-        "PBR non applicata: route-map mancante sulla subinterface",
+        ["ipv6","ra-guard","slaac"], None)
+
+    add_case_to(cases, "PBR non applicata: route-map mancante sulla subinterface",
         "Routing","Altro","Bassa","Cisco","Router","IOS",
         "Traffico prende sempre default.",
         "Policy per link backup.",
@@ -750,13 +638,10 @@ def seed_cases() -> List[Dict]:
         ["int Gi0/0.X ; ip policy route-map BACKUP"],
         ["Traffico matcha policy"],
         ["Check policy per interfaccia corretta"],
-        ["pbr","route-map","subinterface"],
-        {"protocol":"IP","category":"Routing","root_cause":"Policy_On_Wrong_Interface","fix_type":"Bind_On_Correct_Subif",
-         "checks":["route-map counters"],"commands":["ip policy"],"env":{},"keywords":["pbr","route-map"]}
-    )
-    add_case(
-        "DHCP starvation da device anomalo: manca rate-limit/snooping",
-        "LAN","Altro","Media","Cisco","Access","IOS",
+        ["pbr","route-map","subinterface"], None)
+
+    add_case_to(cases, "DHCP starvation da device anomalo: manca rate-limit/snooping",
+        "LAN","DHCP","Media","Cisco","Access","IOS",
         "Pool esaurito improvvisamente.",
         "Device anomalo genera DISCOVER burst.",
         ["DISCOVER pps elevato da singolo MAC"],
@@ -766,13 +651,10 @@ def seed_cases() -> List[Dict]:
         ["/ip dhcp-snooping enable","rate-limit 10pps","blacklist mac"],
         ["Pool stabile"],
         ["Abilitare snooping e rate-limit"],
-        ["dhcp","snooping","starvation"],
-        {"protocol":"DHCP","category":"LAN","root_cause":"No_Snooping_RateLimit","fix_type":"Enable_Snooping_RateLimit",
-         "checks":["snooping stats"],"commands":["rate-limit"],"env":{},"keywords":["dhcp","snooping"]}
-    )
-    add_case(
-        "802.11 roaming scarso: 2.4GHz troppo forte, 5GHz debole",
-        "Wireless","Altro","Bassa","Altro","WLAN","n/a",
+        ["dhcp","snooping","starvation"], None)
+
+    add_case_to(cases, "802.11 roaming scarso: 2.4GHz troppo forte, 5GHz debole",
+        "Wireless","WiFi","Bassa","Altro","WLAN","n/a",
         "Client sticky, throughput basso.",
         "Rete enterprise.",
         ["RSSI alto su AP lontani","Preferenza 2.4GHz"],
@@ -782,12 +664,9 @@ def seed_cases() -> List[Dict]:
         ["set tx-power 2.4 low","set min-RSSI -70","enable k/v/r"],
         ["Roaming fluido"],
         ["Bilanciare potenze e soglie"],
-        ["wifi","band-steering","min-rssi","802.11kvr"],
-        {"protocol":"WiFi","category":"Wireless","root_cause":"Power_Steering_Bad","fix_type":"Tune_Power_MinRSSI",
-         "checks":["rssi hist"],"commands":["min-rssi -70"],"env":{},"keywords":["wifi","roaming"]}
-    )
-    add_case(
-        "PBR di stickiness per evitare asimmetria su firewall",
+        ["wifi","band-steering","min-rssi","802.11kvr"], None)
+
+    add_case_to(cases, "PBR di stickiness per evitare asimmetria su firewall",
         "Security","Altro","Bassa","Altro","Firewall","n/a",
         "Stati TCP si perdono su ritorno.",
         "Due link uplink ECMP.",
@@ -798,10 +677,100 @@ def seed_cases() -> List[Dict]:
         ["policy route hash src-dst","state bypass per subnet X"],
         ["Connessioni stabili"],
         ["Stickiness su stateful"],
-        ["ecmp","pbr","state"],
-        {"protocol":"IP","category":"Security","root_cause":"Asymmetry","fix_type":"PBR_Stickiness",
-         "checks":["conn table"],"commands":["pbr hash"],"env":{},"keywords":["pbr","asymmetric"]}
-    )
+        ["ecmp","pbr","state"], None)
+
+    # (aggiunte varianti/casi ulteriori per arrivare a ~28)
+    add_case_to(cases, "RADIUS CoA non funziona: UDP/3799 non aperto",
+        "Security","Altro","Media","Altro","WLC/RADIUS","n/a",
+        "Cambio VLAN dinamico non applicato.",
+        "RADIUS CoA/DM tra NAS e server.",
+        ["CoA Request senza Reply","timeout sul 3799"],
+        ["fw blocca udp/3799"],
+        "Porta CoA non consentita.",
+        "Aperto UDP 3799 bidirezionale.",
+        ["permit udp 3799"],
+        ["CoA applicato correttamente"],
+        ["Validare porte AAA dinamiche"],
+        ["radius","coa","3799"], None)
+
+    add_case_to(cases, "DNSSEC fallisce per skew orario",
+        "DNS/DHCP","DNS","Bassa","Linux/FRR","Resolver","unbound",
+        "SERVFAIL su domini con DNSSEC.",
+        "Host con orologio fuori sync.",
+        ["val-bogus: signature expired"],
+        ["ntp offset > 300s"],
+        "Time skew rompe validazione.",
+        "Sincronizzato NTP; makestep iniziale.",
+        ["timedatectl set-ntp true"],
+        ["Validation OK"],
+        ["Abilitare monitor NTP"],
+        ["dnssec","ntp","skew"], None)
+
+    add_case_to(cases, "Port mirroring saturato: SPAN in uscita verso uplink",
+        "Switching","Altro","Bassa","Cisco","Agg switch","IOS",
+        "Perdita traffico durante capture.",
+        "SPAN inviato sull’uplink di produzione.",
+        ["drop intermittenti su uplink"],
+        ["show int counters"],
+        "SPAN causa congestione.",
+        "Porta dedicata per SPAN o rate-limit.",
+        ["monitor session 1 destination Gi1/0/48"],
+        ["No drop in produzione"],
+        ["Isolare SPAN dal traffico utente"],
+        ["span","mirror","congestion"], None)
+
+    add_case_to(cases, "ARP cache poisoning evitato con DAI",
+        "LAN","Altro","Bassa","Cisco","Access","IOS",
+        "Allarmi spoof ARP sporadici.",
+        "Client non affidabili su access.",
+        ["gratuitous sospetti","MAC/IP mismatch"],
+        ["no dhcp snooping bindings"],
+        "Assenza DAI + bindings.",
+        "Abilitato DHCP snooping & DAI.",
+        ["ip dhcp snooping","ip arp inspection vlan X"],
+        ["Nessun falso positivo"],
+        ["Sicurezza L2 di base"],
+        ["dai","dhcp snooping","arp"], None)
+
+    add_case_to(cases, "NAT hairpin mancante per accesso a VIP interno",
+        "Security","Altro","Bassa","Altro","Firewall","n/a",
+        "Client interni non accedono a VIP pubblico.",
+        "VIP/DNAT su firewall per servizio interno.",
+        ["interni verso IP pubblico falliscono"],
+        ["no hairpin nat"],
+        "Manca NAT loopback/hairpin.",
+        "Aggiunte regole hairpin e policy corrispondente.",
+        ["nat hairpin enable","dnat+snat rules"],
+        ["Accesso interno funziona"],
+        ["Documentare hairpin per VIP interni"],
+        ["nat","hairpin","vip"], None)
+
+    add_case_to(cases, "Storm-control assente: broadcast/multicast saturano accesso",
+        "Switching","Altro","Media","Cisco","Access","IOS",
+        "Rallentamenti intermittenti su piano L2.",
+        "Host rumorosi in VLAN ampia.",
+        ["broadcast > soglia"],
+        ["no storm-control"],
+        "Assenza limiti di tempesta.",
+        "storm-control broadcast/multicast 1-2%.",
+        ["storm-control broadcast level 1.00"],
+        ["Rete stabile"],
+        ["Applicare storm-control di default"],
+        ["storm-control","broadcast","multicast"], None)
+
+    add_case_to(cases, "DHCP snooping trust non impostato su uplink",
+        "LAN","DHCP","Bassa","Cisco","Access","IOS",
+        "DISCOVER/OFFER bloccati sull’access.",
+        "Server DHCP fuori VLAN, uplink verso L3.",
+        ["packets dropped by dhcp snooping"],
+        ["uplink non trust"],
+        "Porta uplink va trustata.",
+        "ip dhcp snooping trust su uplink.",
+        ["ip dhcp snooping trust"],
+        ["Lease regolari"],
+        ["Checklist: trust uplink"],
+        ["dhcp","snooping","trust"], None)
+
     return cases
 
 # -------------------- Seeding engine --------------------
@@ -820,11 +789,7 @@ def seed_issues(project_id: str, project_short_name: str, idempotent: bool, dry:
     created, skipped = 0, 0
     for it in data:
         s = it["summary"].strip()
-        if prefix:
-            # il check idempotente considera anche il prefisso
-            s_check = f"{prefix} {s}".strip()
-        else:
-            s_check = s
+        s_check = f"{prefix} {s}".strip() if prefix else s
         if idempotent and s_check in existing:
             skipped += 1
             print(f"[SKIP] '{s_check}' esiste già")
@@ -853,24 +818,30 @@ def main():
         proj = create_project(args.name, args.short, me["id"], dry=args.dry_run)
         print(f"[INFO] Creato progetto: {proj['name']} ({proj['shortName']}) -> id {proj['id']}")
 
-    # Crea/associa campi custom (enum + text)
     # Enum bundles
-    categoria_bundle = find_or_create_enum_bundle("NETKB_Categoria", ["WAN","LAN","Security","Wireless","Routing","Switching","VoIP","DNS/DHCP","VPN","QoS"], args.dry_run)
-    protocollo_bundle = find_or_create_enum_bundle("NETKB_Protocollo", ["OSPF","BGP","STP","IPsec","SIP","DNS","DHCP","NTP","LLDP","LACP","MPLS","WireGuard","GRE","VRRP","BFD","WiFi","SSL","IPv6","802.1Q","Altro"], args.dry_run)
-    severita_bundle = find_or_create_enum_bundle("NETKB_Severita", ["Bassa","Media","Alta"], args.dry_run)
-    vendor_bundle = find_or_create_enum_bundle("NETKB_Vendor", ["Cisco","Juniper","MikroTik","Linux/FRR","Palo Alto","Fortinet","Ubiquiti","Altro"], args.dry_run)
+    categoria_bundle  = find_or_create_enum_bundle("NETKB_Categoria",
+        ["WAN","LAN","Security","Wireless","Routing","Switching","VoIP","DNS/DHCP","VPN","QoS"], args.dry_run)
+    protocollo_bundle = find_or_create_enum_bundle("NETKB_Protocollo",
+        ["OSPF","BGP","STP","IPsec","SIP","DNS","DHCP","NTP","LLDP","LACP","MPLS","WireGuard","GRE","VRRP","BFD","WiFi","SSL","IPv6","802.1Q","Altro"], args.dry_run)
+    severita_bundle   = find_or_create_enum_bundle("NETKB_Severita", ["Bassa","Media","Alta"], args.dry_run)
+    vendor_bundle     = find_or_create_enum_bundle("NETKB_Vendor",
+        ["Cisco","Juniper","MikroTik","Linux/FRR","Palo Alto","Fortinet","Ubiquiti","Altro"], args.dry_run)
 
-    # Custom fields
-    cf_categoria = find_or_create_cf_enum("Categoria", categoria_bundle["id"], args.dry_run)
+    # Custom fields (schema)
+    cf_categoria  = find_or_create_cf_enum("Categoria",  categoria_bundle["id"],  args.dry_run)
     cf_protocollo = find_or_create_cf_enum("Protocollo", protocollo_bundle["id"], args.dry_run)
-    cf_severita = find_or_create_cf_enum("Severità", severita_bundle["id"], args.dry_run)
-    cf_vendor = find_or_create_cf_enum("Vendor", vendor_bundle["id"], args.dry_run)
-    cf_device = find_or_create_cf_text("Dispositivo", "string", args.dry_run)
-    cf_osver = find_or_create_cf_text("Versione/OS", "string", args.dry_run)
+    cf_severita   = find_or_create_cf_enum("Severità",   severita_bundle["id"],   args.dry_run)
+    cf_vendor     = find_or_create_cf_enum("Vendor",     vendor_bundle["id"],     args.dry_run)
+    cf_device     = find_or_create_cf_text("Dispositivo", "string", args.dry_run)
+    cf_osver      = find_or_create_cf_text("Versione/OS", "string", args.dry_run)
 
-    # Associa CF al progetto
-    for cf in [cf_categoria, cf_protocollo, cf_severita, cf_vendor, cf_device, cf_osver]:
-        ensure_project_cf(proj["id"], cf["id"], required=False, dry=args.dry_run)
+    # Associa CF al progetto (bundle obbligatorio per gli enum; $type dedotto auto)
+    ensure_project_cf(proj["id"], cf_categoria["id"],  required=False, dry=args.dry_run, bundle_id=categoria_bundle["id"])
+    ensure_project_cf(proj["id"], cf_protocollo["id"], required=False, dry=args.dry_run, bundle_id=protocollo_bundle["id"])
+    ensure_project_cf(proj["id"], cf_severita["id"],   required=False, dry=args.dry_run, bundle_id=severita_bundle["id"])
+    ensure_project_cf(proj["id"], cf_vendor["id"],     required=False, dry=args.dry_run, bundle_id=vendor_bundle["id"])
+    ensure_project_cf(proj["id"], cf_device["id"],     required=False, dry=args.dry_run)
+    ensure_project_cf(proj["id"], cf_osver["id"],      required=False, dry=args.dry_run)
 
     # Seed issues
     seed_issues(proj["id"], args.short, args.idempotent, args.dry_run, project_existed, args.prefix)
