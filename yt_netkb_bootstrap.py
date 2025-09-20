@@ -3,8 +3,8 @@
 import requests, sys, argparse, time, re, json
 from typing import Dict, List
 
-BASE_URL = "https://tuaistanza.youtrack.cloud/api"
-TOKEN = "ybpt_xxx_copia_il_tuo_token_qui"
+BASE_URL = "https://fabioantonini.youtrack.cloud/api"
+TOKEN = "perm-YWRtaW4=.NDQtMA==.QJNcVBhDks9awoACXR2127Up24kEem"
 
 HDRS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -91,20 +91,37 @@ def find_or_create_cf_text(name: str, cf_type: str, dry: bool) -> Dict:
     body = {"name": name, "fieldType": {"id": cf_type}}
     return req("POST", "/admin/customFieldSettings/customFields?fields=id,name", json=body)
 
-def ensure_project_cf(project_id: str, cf_id: str, required: bool, dry: bool):
-    # aggiunge il CF al progetto se assente
-    fields = req("GET", f"/admin/projects/{project_id}/customFields?fields=id,field(id,name),canBeEmpty,emptyFieldText")
-    for f in fields:
-        if f["field"]["id"] == cf_id:
-            return
-    if dry:
+def ensure_project_cf(project_id: str, cf_id: str, required: bool, dry: bool) -> None:
+    """
+    Ensure that a custom field (cf_id) is associated with the given project (project_id).
+    In dry-run mode (or when using a DRY-* fake project id), no API calls are performed.
+    """
+    # Skip real API calls in dry-run or with fake project id
+    if dry or str(project_id).startswith("DRY-"):
         print(f"[DRY] Assocerei CF {cf_id} al progetto {project_id}")
         return
+    # aggiunge il CF al progetto se assente
+    # Check if the custom field is already linked to the project
+    fields = req(
+        "GET",
+        f"/admin/projects/{project_id}/customFields?fields=id,field(id,name),canBeEmpty,emptyFieldText"
+    )
+    for f in fields:
+        field = f.get("field", {})
+        if field.get("id") == cf_id:
+            return  # already present
+
+    # Link the custom field to the project
     body = {
         "field": {"id": cf_id},
         "canBeEmpty": not required
     }
-    req("POST", f"/admin/projects/{project_id}/customFields?fields=id,field(name)", json=body)
+    req(
+        "POST",
+        f"/admin/projects/{project_id}/customFields?fields=id,field(name)",
+        json=body
+    )
+
 
 # -------------------- Issues --------------------
 def fetch_existing_summaries(project_short_name: str) -> set:
@@ -336,18 +353,50 @@ def seed_cases() -> List[Dict]:
     })
 
     # (Aggiungo altri 21 casi sintetici ma completi)
-    def add_case(summary, cat, proto, sev, vendor, dev, osver, problema, contesto, sintomi, evid, analisi, root, fix, cmds, verify, lessons, kws, js):
-        t, d = case_block(summary, problema, contesto, sintomi, evid, analisi, root, fix, cmds, verify, lessons, kws, js)
+    def add_case(
+        summary: str,
+        cat: str, proto: str, sev: str, vendor: str, dev: str, osver: str,
+        problema: str, contesto: str,
+        sintomi: list, evid: list, analisi: str, root: str,
+        fix: list, cmds: list, verify: list, lessons: list, kws: list,
+        js: dict = None
+    ):
+        # Se il blocco JSON non è passato, costruiamone uno minimale ma coerente
+        def _slug(s: str) -> str:
+            import re as _re
+            s = s.strip() or "Unknown"
+            s = s.replace(" ", "_")
+            s = _re.sub(r"[^A-Za-z0-9_]+", "", s)
+            return (s or "Unknown")[:48]
+
+        if js is None:
+            js = {
+                "protocol": proto if proto and proto != "Altro" else "IP",
+                "category": cat or "Routing",
+                "root_cause": _slug(root),
+                "fix_type": _slug(fix[0]) if fix else "Manual_Fix",
+                "checks": sintomi if sintomi else (evid if evid else []),
+                "commands": cmds or [],
+                "env": {"vendor": vendor or "Altro", "device": dev or "n/a", "os": osver or "n/a"},
+                "keywords": kws or []
+            }
+
+        t, d = case_block(
+            summary, problema, contesto, sintomi, evid, analisi, root, fix, cmds, verify, lessons, kws, js
+        )
         cases.append({
-            "summary": t, "description": d,
+            "summary": t,
+            "description": d,
             "custom": {
-                "Categoria": {"_type":"enum","name":cat},
-                "Protocollo": {"_type":"enum","name":proto},
-                "Severità": {"_type":"enum","name":sev},
-                "Vendor": {"_type":"enum","name":vendor},
-                "Dispositivo": dev, "Versione/OS": osver
+                "Categoria": {"_type": "enum", "name": cat},
+                "Protocollo": {"_type": "enum", "name": proto},
+                "Severità": {"_type": "enum", "name": sev},
+                "Vendor": {"_type": "enum", "name": vendor},
+                "Dispositivo": dev,
+                "Versione/OS": osver
             }
         })
+
 
     add_case(
         "DHCP relay ignora richieste: manca Option 82 richiesta dal server",
