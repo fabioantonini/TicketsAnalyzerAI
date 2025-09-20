@@ -3,8 +3,8 @@
 import requests, sys, argparse, time, re, json
 from typing import Dict, List, Optional
 
-BASE_URL = "https://tuaistanza.youtrack.cloud/api"
-TOKEN = "ybpt_xxx_copia_il_tuo_token_qui"
+BASE_URL = "https://fabioantonini.youtrack.cloud/api"
+TOKEN = "perm-YWRtaW4=.NDQtMA==.QJNcVBhDks9awoACXR2127Up24kEem"
 
 HDRS = {
     "Authorization": f"Bearer {TOKEN}",
@@ -68,10 +68,7 @@ def find_or_create_cf_enum(name: str, bundle_id: str, dry: bool) -> Dict:
     if dry:
         print(f"[DRY] Creerei CustomField enum {name} (bundle {bundle_id})")
         return {"id": f"DRY-CF-{name}", "name": name}
-    body = {
-        "name": name,
-        "fieldType": {"id": "enum[1]"}  # tipo corretto per enum
-    }
+    body = {"name": name, "fieldType": {"id": "enum[1]"}}
     return req("POST", "/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)", json=body)
 
 def find_or_create_cf_text(name: str, cf_type: str, dry: bool) -> Dict:
@@ -84,7 +81,7 @@ def find_or_create_cf_text(name: str, cf_type: str, dry: bool) -> Dict:
         print(f"[DRY] Creerei CustomField {cf_type} {name}")
         return {"id": f"DRY-CF-{name}", "name": name}
     body = {"name": name, "fieldType": {"id": cf_type}}
-    return req("POST", "/admin/customFieldSettings/customFields?fields=id,name", json=body)
+    return req("POST", "/admin/customFieldSettings/customFields?fields=id,name,fieldType(id)", json=body)
 
 # ---- mapping & helpers per ProjectCustomField ----
 def _proj_cf_type_from_fieldtype(fieldtype_id: str) -> str:
@@ -116,6 +113,21 @@ def get_customfield_type_id(cf_id: str) -> str:
     cf = req("GET", f"/admin/customFieldSettings/customFields/{cf_id}?fields=fieldType(id)")
     return (cf.get("fieldType") or {}).get("id", "string")
 
+def _attach_cf_with_body(project_id: str, body: dict) -> None:
+    try:
+        req(
+            "POST",
+            f"/admin/projects/{project_id}/customFields?fields=id,$type,field(id,name),customField(id,name),bundle(id,name,$type)",
+            json=body
+        )
+    except SystemExit:
+        print("[DEBUG] Attach fallito. Body inviato:")
+        try:
+            print(json.dumps(body, indent=2, ensure_ascii=False))
+        except Exception:
+            print(str(body))
+        raise
+
 def ensure_project_cf(
     project_id: str,
     cf_id: str,
@@ -125,9 +137,10 @@ def ensure_project_cf(
     bundle_id: Optional[str] = None
 ) -> None:
     """
-    Collega un CustomField al progetto istanziando il ProjectCustomField corretto.
-    Se proj_cf_type è None, viene dedotto dal fieldType del CustomField.
-    Per i campi enum passare bundle_id.
+    Collega un CustomField al progetto.
+    - Deduce $type dal fieldType del CF se non fornito.
+    - Prova prima la chiave 'customField', poi fallback a 'field'.
+    - Per enum passa bundle con $type='EnumBundle'.
     """
     if dry or str(project_id).startswith("DRY-"):
         msg = f"[DRY] Assocerei CF {cf_id} al progetto {project_id}"
@@ -138,33 +151,40 @@ def ensure_project_cf(
         print(msg)
         return
 
+    # già presente?
     fields = req(
         "GET",
-        f"/admin/projects/{project_id}/customFields?fields=id,field(id,name),$type,bundle(id,name)"
+        f"/admin/projects/{project_id}/customFields?fields=id,field(id,name),customField(id,name),$type,bundle(id,name,$type)"
     )
     if isinstance(fields, list):
         for f in fields:
-            if f.get("field", {}).get("id") == cf_id:
-                return  # già presente
+            linked = f.get("field") or f.get("customField") or {}
+            if linked.get("id") == cf_id:
+                return
 
-    # deduci $type se non passato
+    # deduci tipo se non passato
     if not proj_cf_type:
-        ft_id = get_customfield_type_id(cf_id)  # es: "enum[1]", "string"
+        ft_id = get_customfield_type_id(cf_id)
         proj_cf_type = _proj_cf_type_from_fieldtype(ft_id)
+    print(f"[INFO] Allego CF {cf_id} come {proj_cf_type}")
 
-    body = {
-        "$type": proj_cf_type,
-        "field": {"id": cf_id, "$type": "CustomField"},  # <-- importante
-        "canBeEmpty": not required,
-    }
+    base = {"$type": proj_cf_type, "canBeEmpty": not required}
     if bundle_id:
-        body["bundle"] = {"id": bundle_id}
+        base["bundle"] = {"id": bundle_id, "$type": "EnumBundle"}
 
-    req(
-        "POST",
-        f"/admin/projects/{project_id}/customFields?fields=id,$type,field(name),bundle(id,name)",
-        json=body
-    )
+    body_A = dict(base)
+    body_A["customField"] = {"id": cf_id, "$type": "CustomField"}
+    try:
+        _attach_cf_with_body(project_id, body_A)
+        print("[INFO] Attach riuscito con chiave 'customField'")
+        return
+    except SystemExit:
+        print("[WARN] Attach con 'customField' fallito. Provo con 'field'...")
+
+    body_B = dict(base)
+    body_B["field"] = {"id": cf_id, "$type": "CustomField"}
+    _attach_cf_with_body(project_id, body_B)
+    print("[INFO] Attach riuscito con chiave 'field'")
 
 # -------------------- Issues helpers --------------------
 def fetch_existing_summaries(project_short_name: str) -> set:
@@ -204,18 +224,36 @@ def create_issue(project_id: str, summary: str, description: str, custom: Dict, 
     if not has_valid_json_block(description):
         print(f"[VALIDATION] '{summary}' senza JSON valido (chiavi richieste: {JSON_REQUIRED_KEYS}). Skippo.")
         return None
+
     if dry:
         print(f"[DRY] Creerei issue: {summary}")
         return {"id": "DRY-ISSUE-ID", "idReadable": "NETKB-XXX", "summary": summary}
 
+    # Costruisci i campi custom con il $type dell'IssueCustomField:
+    #  - enum: SingleEnumIssueCustomField + value = EnumBundleElement
+    #  - string/text: SimpleIssueCustomField (per i tuoi "Dispositivo" e "Versione/OS")
     cf_payload = []
     for fname, fval in custom.items():
         if fval is None:
             continue
+
         if isinstance(fval, dict) and fval.get("_type") == "enum":
-            cf_payload.append({"name": fname, "value": {"name": fval["name"]}})
+            cf_payload.append({
+                "name": fname,
+                "$type": "SingleEnumIssueCustomField",
+                "value": {
+                    "name": fval["name"],
+                    "$type": "EnumBundleElement"
+                }
+            })
         else:
-            cf_payload.append({"name": fname, "value": fval})
+            # Per campi semplici (string/text/number) usa SimpleIssueCustomField
+            # (i tuoi due CF sono di tipo string)
+            cf_payload.append({
+                "name": fname,
+                "$type": "SimpleIssueCustomField",
+                "value": fval
+            })
 
     payload = {
         "project": {"id": project_id},
@@ -300,7 +338,7 @@ def add_case_to(
         }
     })
 
-# -------------------- Seed data (28 casi) --------------------
+# -------------------- Seed data (>=28 casi) --------------------
 def seed_cases() -> List[Dict]:
     cases: List[Dict] = []
 
@@ -316,15 +354,7 @@ def seed_cases() -> List[Dict]:
         ["ip link set dev eth1 mtu 1400","interface Gi0/0 ; mtu 1400 ; ip ospf mtu-ignore"],
         ["Neighbor FULL","Ping DF size 1372 ok"],
         ["Standard MTU per link con overlay","Evitare mtu-ignore in esercizio"],
-        ["ospf","exstart","exchange","mtu mismatch","mtu-ignore","dbd","gre","p2p"],
-        {
-            "protocol":"OSPF","category":"Routing","root_cause":"MTU_mismatch","fix_type":"MTU_align",
-            "checks":["show ip ospf interface","ping DF 1372"],
-            "commands":["mtu 1400","ip ospf mtu-ignore"],
-            "env":{"vendorA":"Linux/FRR","vendorB":"Cisco IOS","overlay":"GRE"},
-            "keywords":["ospf","exstart","exchange","mtu mismatch","mtu-ignore","dbd","gre","p2p"]
-        }
-    )
+        ["ospf","exstart","exchange","mtu mismatch","mtu-ignore","dbd","gre","p2p"], None)
 
     add_case_to(cases, "WAN PPPoE lenta e loss: MTU 1500 su PPPoE, PMTUD bloccato, MSS non clampato",
         "WAN","Altro","Alta","Linux/FRR","edge-router","Linux 5.x",
@@ -384,7 +414,7 @@ def seed_cases() -> List[Dict]:
         "Routing","BGP","Alta","Cisco","Router edge","IOS XE 17.x",
         "Sessione eBGP instabile ogni 30s.",
         "Peer ISP con timers 1/3s.",
-        ["ADJCHANGE Idle/Established frequente"],
+        ["ADJCHANGE frequente"],
         ["bgp summary, timers 1/3"],
         "Keepalive/hold inadeguati; dampening penalizza prefissi.",
         "Timers 10/30 e no dampening su prefissi critici.",
@@ -582,7 +612,7 @@ def seed_cases() -> List[Dict]:
         ["state miss sul ritorno"],
         ["session table miss"],
         "Ritorno esce su link diverso (no stickiness).",
-        "PBR per stickiness o eccezione state per subnet note.",
+        "PBR per stickiness o eccezione state su subnet note.",
         ["policy-based routing","disable state per subnet note"],
         ["Connessioni stabili"],
         ["Evitare asimmetria con stateful"],
@@ -679,7 +709,6 @@ def seed_cases() -> List[Dict]:
         ["Stickiness su stateful"],
         ["ecmp","pbr","state"], None)
 
-    # (aggiunte varianti/casi ulteriori per arrivare a ~28)
     add_case_to(cases, "RADIUS CoA non funziona: UDP/3799 non aperto",
         "Security","Altro","Media","Altro","WLC/RADIUS","n/a",
         "Cambio VLAN dinamico non applicato.",
