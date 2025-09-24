@@ -1,5 +1,3 @@
-Grande base per una PoC: struttura pulita (client YouTrack, VectorStore, LLM backend), self-tests e anche modalità CLI. Ecco cosa aggiungerei/subito, in ordine di impatto vs sforzo.
-
 Must have (per una PoC convincente)
 
 1. Sync incrementale e upsert
@@ -165,5 +163,3 @@ Note puntuali sul codice attuale
 * L’UI è già wide e la tabella usa un width parametrico; bene per evitare la “finestra stretta”.&#x20;
 * L’ingest indicizza summary e description (tramite text\_blob), quindi non solo i titoli.&#x20;
 * LLMBackend: ottimo il fallback Responses → chat.completions; rendi solo più robusta l’estrazione del testo e centralizza la gestione della chiave.&#x20;
-
-Se vuoi, nel prossimo messaggio ti preparo i patch diff pronti da copiare-incollare per: sync incrementale paginato, chunking, MMR, gestione chiavi e link agli issue.
