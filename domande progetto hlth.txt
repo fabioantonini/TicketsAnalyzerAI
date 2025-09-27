@@ -13,3 +13,20 @@ risposta openai: In caso di uso di una crema cortisonica topica, la terapia dovr
 risposta ollama: In base alle informazioni presenti nei ticket simili [HLTH-19] e [HLTH-25], sembra che la terapia con crema cortisonica topica debba durare massimo 7 giorni. Tuttavia, non sono riuscito a trovare una risposta definitiva su questo argomento.
 
 
+domanda 3:
+quale è la dosaggio per una terapia a base di magnesio?
+
+risposta openai gpt-4o
+Per una terapia a base di magnesio, un dosaggio comune è di 375 mg al giorno, come indicato nel ticket [HLTH-18]. Questo dosaggio è stato utilizzato per un periodo di 20 giorni, con successiva rivalutazione. Tuttavia, è importante consultare un medico per personalizzare il dosaggio in base alle esigenze specifiche del paziente.
+
+domanda 4:
+dopo una ECG dopo quando deve avvenire la visita di controllo?
+
+risposta gpt-40
+Per una visita di controllo dopo un ECG, il ticket [HLTH-22] suggerisce un follow-up entro circa una settimana dall'esame, come indicato con la prossima azione al 2025-10-01. Questo intervallo consente di verificare l'esito dell'ECG e valutare eventuali sintomi correlati, come le palpitazioni. Ti consiglio di programmare la visita di controllo entro questo periodo, salvo diverse indicazioni mediche specifiche.
+
+
+
+
+
+

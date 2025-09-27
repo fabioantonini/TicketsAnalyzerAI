@@ -126,3 +126,19 @@ Domande di chiarimento
 Quale modello e firmware del firewall è in uso?
 L’SBC utilizza porte RTP statiche o dinamiche?
 Hai già verificato che l’ALG non sia attivo in modalità “inspect” o “helper” su altri servizi (es. SIP‑UDP 5060)?
+
+
+7) sto avendo problemi di roaming su protocollo 802.11. cosa posso fare?
+Per risolvere i problemi di roaming su protocollo 802.11, ti consiglio di seguire questi passaggi, basati sul ticket simile [NETKB-26]:
+
+Controlla il livello di segnale (RSSI): Assicurati che il segnale degli AP non sia troppo forte per la banda 2.4GHz e che la banda 5GHz non sia troppo debole.
+
+Imposta il min-RSSI: Configura il valore di min-RSSI a -70 dBm per garantire che i client non si connettano a AP lontani con segnale debole.
+
+Regola la potenza di trasmissione: Imposta la potenza di trasmissione per la banda 2.4GHz su un valore basso per bilanciare il segnale.
+
+Abilita 802.11k/v/r: Assicurati che le funzionalità di roaming assistito siano attive per migliorare l'esperienza di roaming.
+
+Verifica le soglie di roaming: Controlla che le soglie di steering siano configurate correttamente.
+
+Dopo aver applicato queste modifiche, verifica se il roaming è migliorato. Se hai bisogno di ulteriori dettagli o assistenza, fammi sapere!

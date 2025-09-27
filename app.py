@@ -289,7 +289,36 @@ def run_streamlit_app() -> None:
         st.markdown("---")
         st.header("Vector DB")
         persist_dir = st.text_input("Chroma path", value=DEFAULT_CHROMA_DIR)
-        collection_name = st.text_input("Collection", value=DEFAULT_COLLECTION)
+
+        # Legge le collections già presenti nel datastore
+        coll_options = []
+        try:
+            if chromadb is not None:
+                _client = chromadb.PersistentClient(
+                    path=persist_dir,
+                    settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
+                )
+                coll_options = [c.name for c in _client.list_collections()]  # type: ignore
+        except Exception as e:
+            st.caption(f"Impossibile leggere le collections da '{persist_dir}': {e}")
+
+        # Se non ci sono collections, proponi direttamente la creazione di una nuova
+        if not coll_options:
+            st.caption("Nessuna collection trovata. Creane una nuova:")
+            collection_name = st.text_input("Nuova Collection", value=DEFAULT_COLLECTION)
+        else:
+            # Aggiungi opzione per crearne una nuova
+            NEW_LABEL = "➕ Crea nuova collection..."
+            opts = coll_options + [NEW_LABEL]
+
+            # Pre-seleziona la default se esiste
+            default_index = opts.index(DEFAULT_COLLECTION) if DEFAULT_COLLECTION in opts else 0
+            sel = st.selectbox("Collection", options=opts, index=default_index)
+
+            if sel == NEW_LABEL:
+                collection_name = st.text_input("Nome nuova Collection", value=DEFAULT_COLLECTION)
+            else:
+                collection_name = sel
 
         st.markdown("---")
         st.header("Embeddings")

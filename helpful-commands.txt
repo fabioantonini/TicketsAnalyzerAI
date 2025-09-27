@@ -1,0 +1,3 @@
+python.exe .\yt_governance_bootstrap.py --base https://fabioantonini.youtrack.cloud --token <YT_TOKEN> --short ROUT --name RouterNextGen --prefix "[GOV]"
+
+streamlit run app_gov.py  --server.port 8503
