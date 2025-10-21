@@ -196,9 +196,10 @@ class VectorStore:
 # LLM Backend
 # ------------------------------
 class LLMBackend:
-    def __init__(self, provider: str, model_name: str):
+    def __init__(self, provider: str, model_name: str, temperature: float = 0.2):
         self.provider = provider
         self.model_name = model_name
+        self.temperature = float(temperature)
         if provider == "OpenAI":
             if OpenAI is None:
                 raise RuntimeError("openai SDK non disponibile")
@@ -207,7 +208,7 @@ class LLMBackend:
                 raise RuntimeError("OPENAI_API_KEY non impostata")
             self.client = OpenAI(api_key=api_key)
         elif provider == "Ollama (locale)":
-            self.client = None  # usi REST semplice
+            self.client = None  # REST semplice
         else:
             raise RuntimeError("Provider LLM non supportato")
 
@@ -218,6 +219,7 @@ class LLMBackend:
                 res = self.client.responses.create(
                     model=self.model_name,
                     input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    temperature=self.temperature,
                 )
                 return res.output_text  # type: ignore
             except Exception:
@@ -225,27 +227,27 @@ class LLMBackend:
                 chat = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    temperature=self.temperature,
                 )
                 return chat.choices[0].message.content or ""
         elif self.provider == "Ollama (locale)":
             import requests, json
-
             url = "http://localhost:11434/api/chat"
             payload = {
-                "model": self.model_name,  # es: "llama3.2" o "llama3.2:latest"
+                "model": self.model_name,  # es. "llama3.2" o "llama3.2:latest"
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "stream": False  # fondamentale per evitare JSON concatenati
+                "stream": False,  # evita JSON concatenati
+                "options": {"temperature": self.temperature},  # Ollama supporta temperature
             }
-
             r = requests.post(url, json=payload, timeout=300)
             try:
                 r.raise_for_status()
-                data = r.json()  # ora deve essere un singolo JSON
+                data = r.json()  # singolo JSON
             except json.JSONDecodeError:
-                # Fallback: se arriva ancora streaming, ricomponi i chunk JSON
+                # fallback per eventuale streaming non richiesto
                 text = r.text.strip()
                 chunks, buf, depth = [], "", 0
                 for ch in text:
@@ -265,23 +267,20 @@ class LLMBackend:
                     if isinstance(obj, dict):
                         if "message" in obj and isinstance(obj["message"], dict) and "content" in obj["message"]:
                             parts.append(obj["message"]["content"])
-                        elif "response" in obj:  # compat con /api/generate
+                        elif "response" in obj:
                             parts.append(obj["response"])
                 return "\n".join(parts).strip() if parts else text
 
-            # Risposta non-stream (singolo JSON)
             if isinstance(data, dict):
                 if "message" in data and isinstance(data["message"], dict) and "content" in data["message"]:
                     return data["message"]["content"]
-                if "response" in data:  # compat con /api/generate
+                if "response" in data:
                     return data["response"]
                 if "messages" in data and isinstance(data["messages"], list) and data["messages"]:
                     last = data["messages"][-1]
                     if isinstance(last, dict) and "content" in last:
                         return last["content"]
-
             return str(data)
-
         return "Provider LLM non supportato"
 
 
@@ -386,6 +385,7 @@ def run_streamlit_app():
         st.header("LLM")
         llm_provider = st.selectbox("Provider LLM", ["OpenAI", "Ollama (locale)"])
         llm_model = st.text_input("Modello LLM", value=DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
+        llm_temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.05)
 
         st.markdown("---")
         quit_btn = st.button("Quit")
@@ -572,7 +572,7 @@ def run_streamlit_app():
                 dists = res.get("distances", [[]])[0]
                 retrieved = list(zip(docs, metas, dists))
                 prompt = build_prompt(query, retrieved)
-                llm = LLMBackend(llm_provider, llm_model)
+                llm = LLMBackend(llm_provider, llm_model, temperature=llm_temperature)
                 with st.spinner("Genero risposta..."):
                     answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
                 st.write(answer)
