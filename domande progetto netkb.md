@@ -45,7 +45,7 @@ Se il retriever è a posto, dovresti vedere match forti con i tuoi ticket:
 * **Native VLAN** → caso “VLAN Native mismatch su trunk 802.1Q causa perdita traffico”
 
 
-4) SIP ALG one-way audio
+### 4) SIP ALG one-way audio
 
 breve query: chiamate VoIP con audio monodirezionale dopo inserimento nuovo firewall
 descrizione: dopo il cambio firewall le chiamate SIP passano ma spesso l’audio è monodirezionale (solo in uscita). Sospetto che l’ALG SIP stia riscrivendo SDP/RTP rompendo il NAT traversal gestito dallo SBC.
@@ -59,7 +59,7 @@ SDP nei pacchetti INVITE/200OK mostra IP/porte RTP diversi lato WAN
 disattivando temporaneamente SIP ALG su firewall, una chiamata di prova funziona
 keywords: sip, alg, sdp, rtp, one-way audio, sbc, nat traversal
 
-5) DHCP Option 82 (relay)
+### 5) DHCP Option 82 (relay)
 
 breve query: client non ottengono IP via DHCP relay; server richiede Option 82
 descrizione: su alcune VLAN di accesso i client non ricevono lease. Il server DHCP centrale applica policy basate su Circuit-ID/Remote-ID e sembra scartare richieste senza Option 82.
@@ -73,7 +73,7 @@ sniff su SVI mostra giunte richieste senza option 82
 log server: “missing option 82 – request ignored”
 keywords: dhcp, relay, option 82, circuit-id, remote-id, svi, access
 
-6) LACP incoerente (port-channel instabile)
+### 6) LACP incoerente (port-channel instabile)
 
 breve query: bundle LACP con flapping e throughput altalenante
 descrizione: port-channel a 2×10G tra access-agg/core con continui eventi “individual” sui membri; hash di bilanciamento e rate LACP sembrano diversi sui due lati.
@@ -95,10 +95,10 @@ Soluzione rapida
 
 Disabilita l’ALG SIP sul firewall
 
-# esempio per un firewall Cisco ASA
+#### esempio per un firewall Cisco ASA
 no policy-map type inspect sip SIP-ALG
 no inspect sip
-# per FortiGate
+#### per FortiGate
 config system settings
 set sip-inspection disable
 end
@@ -128,7 +128,7 @@ L’SBC utilizza porte RTP statiche o dinamiche?
 Hai già verificato che l’ALG non sia attivo in modalità “inspect” o “helper” su altri servizi (es. SIP‑UDP 5060)?
 
 
-7) sto avendo problemi di roaming su protocollo 802.11. cosa posso fare?
+### 7) sto avendo problemi di roaming su protocollo 802.11. cosa posso fare?
 Per risolvere i problemi di roaming su protocollo 802.11, ti consiglio di seguire questi passaggi, basati sul ticket simile [NETKB-26]:
 
 Controlla il livello di segnale (RSSI): Assicurati che il segnale degli AP non sia troppo forte per la banda 2.4GHz e che la banda 5GHz non sia troppo debole.
