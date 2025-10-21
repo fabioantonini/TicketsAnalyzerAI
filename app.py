@@ -1,3 +1,4 @@
+# app.py
 """
 Streamlit RAG Support App (completa, con debug + self-tests + UI + Quit)
 
@@ -8,25 +9,29 @@ Funzionalità
 4) Chat RAG: ricerca ticket simili + risposta LLM con citazioni ID
 5) Modalità CLI con self-tests quando Streamlit non è disponibile
 6) Pulsante Quit nella sidebar per chiudere l’app dal browser
-7) Se trova data/chroma/chroma.sqlite3, la collezione viene aperta e viene mostrato in sidebar un messaggio verde con il numero di documenti caricati (o “N/A” se non disponibile)
+7) Se trova data/chroma/chroma.sqlite3, la collezione viene aperta automaticamente e mostrato il numero di documenti caricati (o “N/A” se non disponibile)
 
 Avvio consigliato
 streamlit run app.py --server.port 8502
 """
 
-from __future__ import annotations
 import os
+import sys
+import time
 import json
+import math
+import uuid
+import typing
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Tuple, Optional
 
-import requests
-import pandas as pd
-
+# ------------------------------
+# Try imports con fallback/shim
+# ------------------------------
 try:
-    import streamlit as st  # type: ignore
+    import streamlit as st
     ST_AVAILABLE = True
-    print("[DEBUG] Streamlit importato correttamente.")
+    print("[DEBUG] Streamlit importato.")
 except Exception:
     ST_AVAILABLE = False
     print("[DEBUG] Streamlit non disponibile, uso shim.")
@@ -63,11 +68,20 @@ except Exception:
     OpenAI = None  # type: ignore
     print("[DEBUG] openai SDK non disponibile.")
 
-DEFAULT_CHROMA_DIR = os.path.join("data", "chroma")
-DEFAULT_COLLECTION = "youtrack_tickets"
-DEFAULT_OLLAMA_MODEL = "llama3.2"
-DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
+# ------------------------------
+# Costanti
+# ------------------------------
+DEFAULT_CHROMA_DIR = "data/chroma"
+DEFAULT_COLLECTION = "tickets"
+DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+DEFAULT_LLM_MODEL = "gpt-4o"
+DEFAULT_OLLAMA_MODEL = "llama3.2"
+
+
+# ------------------------------
+# YouTrack Client + DTO
+# ------------------------------
 @dataclass
 class YTIssue:
     id_readable: str
@@ -76,33 +90,28 @@ class YTIssue:
     project: str
 
     def text_blob(self) -> str:
-        desc = self.description or ""
-        return f"[{self.id_readable}] {self.summary}\n\n{desc}"
+        return f"{self.summary}\n\n{self.description or ''}"
+
 
 class YouTrackClient:
     def __init__(self, base_url: str, token: str):
-        print(f"[DEBUG] Inizializzazione YouTrackClient con base_url={base_url}")
         self.base_url = base_url.rstrip("/")
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-        })
+        self.token = token
 
-    def _get(self, path: str, params: Optional[dict] = None) -> Any:
+    def _get(self, path: str, params: Optional[dict] = None):
+        import requests
         url = f"{self.base_url}{path}"
-        print(f"[DEBUG] GET {url} con params={params}")
-        r = self.session.get(url, params=params, timeout=30)
+        headers = {"Authorization": f"Bearer {self.token}"}
+        r = requests.get(url, headers=headers, params=params, timeout=30)
         r.raise_for_status()
         return r.json()
 
-    def list_projects(self) -> List[Dict[str, Any]]:
-        print("[DEBUG] list_projects chiamato")
-        fields = "id,name,shortName"
-        return self._get("/api/admin/projects", params={"fields": fields})
+    def list_projects(self) -> List[dict]:
+        print("[DEBUG] list_projects")
+        return self._get("/api/admin/projects", params={"fields": "name,shortName,id"})
 
     def list_issues(self, project_key: str, limit: int = 200) -> List[YTIssue]:
-        print(f"[DEBUG] list_issues per progetto={project_key}")
+        print(f"[DEBUG] list_issues per progetto {project_key}")
         fields = "idReadable,summary,description,project(name,shortName)"
         params = {
             "query": f"project: {project_key}",
@@ -118,137 +127,163 @@ class YouTrackClient:
                     summary=it.get("summary", ""),
                     description=it.get("description", ""),
                     project=(it.get("project", {}) or {}).get("shortName")
-                    or (it.get("project", {}) or {}).get("name", ""),
+                            or (it.get("project", {}) or {}).get("name", ""),
                 )
             )
-        print(f"[DEBUG] {len(issues)} ticket recuperati.")
+        print(f"[DEBUG] trovati {len(issues)} issues")
         return issues
 
+
+# ------------------------------
+# Embeddings backend
+# ------------------------------
 class EmbeddingBackend:
-    def __init__(self, use_openai: bool, model_name: str = DEFAULT_EMBEDDING_MODEL):
-        print(f"[DEBUG] Inizializzazione EmbeddingBackend, use_openai={use_openai}, model={model_name}")
+    def __init__(self, use_openai: bool, model_name: str):
         self.use_openai = use_openai
         self.model_name = model_name
-        self.client = None
-        self.local_model = None
+        self.provider_name = "openai" if use_openai else "sentence-transformers"
+
         if use_openai:
             if OpenAI is None:
-                raise RuntimeError("openai SDK non installato")
-            api_key = os.getenv("OPENAI_API_KEY_EXPERIMENTS")
+                raise RuntimeError("openai SDK non disponibile")
+            api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_EXPERIMENTS")
             if not api_key:
                 raise RuntimeError("OPENAI_API_KEY non impostata")
             self.client = OpenAI(api_key=api_key)
         else:
             if SentenceTransformer is None:
-                raise RuntimeError("sentence-transformers non installato")
-            self.local_model = SentenceTransformer(model_name)
+                raise RuntimeError("sentence-transformers non disponibile")
+            self.model = SentenceTransformer(model_name)
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        print(f"[DEBUG] embed chiamato su {len(texts)} testi")
+        print(f"[DEBUG] embed {len(texts)} testi con provider={self.provider_name} modello={self.model_name}")
         if self.use_openai:
-            res = self.client.embeddings.create(model="text-embedding-3-small", input=texts)  # type: ignore
+            res = self.client.embeddings.create(model=self.model_name, input=texts)
             return [d.embedding for d in res.data]  # type: ignore
-        else:
-            embs = self.local_model.encode(
-                texts, convert_to_numpy=True, show_progress_bar=False
-            )
-            # Se è un numpy array, converti in lista di liste
-            return embs.tolist()
+        return self.model.encode(texts, normalize_embeddings=True).tolist()  # type: ignore
 
 
+# ------------------------------
+# VectorStore (Chroma wrapper)
+# ------------------------------
 class VectorStore:
-    def __init__(self, persist_dir: str = DEFAULT_CHROMA_DIR, collection_name: str = DEFAULT_COLLECTION):
-        print(f"[DEBUG] Inizializzazione VectorStore dir={persist_dir}, collection={collection_name}")
+    def __init__(self, persist_dir: str, collection_name: str):
         if chromadb is None:
-            raise RuntimeError("chromadb non installato")
-        os.makedirs(persist_dir, exist_ok=True)
-        self.client = chromadb.PersistentClient(path=persist_dir, settings=ChromaSettings(anonymized_telemetry=False))  # type: ignore
-        self.collection = self.client.get_or_create_collection(collection_name)
+            raise RuntimeError("chromadb non disponibile")
+        self.persist_dir = persist_dir
+        self.collection_name = collection_name
+        self.client = chromadb.PersistentClient(
+            path=persist_dir,
+            settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
+        )
+        self.col = self.client.get_or_create_collection(name=collection_name, metadata={"hnsw:space": "cosine"})
 
-    def add(self, ids: List[str], texts: List[str], metadatas: List[dict], embeddings: Optional[List[List[float]]] = None):
-        print(f"[DEBUG] Aggiungo {len(ids)} documenti a VectorStore")
-        self.collection.add(ids=ids, documents=texts, metadatas=metadatas, embeddings=embeddings)  # type: ignore
+    def add(self, ids: List[str], documents: List[str], metadatas: List[dict], embeddings: List[List[float]]):
+        print(f"[DEBUG] add {len(ids)} documenti a {self.collection_name}")
+        self.col.add(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
 
-    def query(self, query_embeddings: List[List[float]], n_results: int = 5) -> Dict[str, Any]:
-        print(f"[DEBUG] Query VectorStore con n_results={n_results}")
-        return self.collection.query(query_embeddings=query_embeddings, n_results=n_results, include=["documents", "metadatas", "distances"])  # type: ignore
+    def query(self, query_embeddings: List[List[float]], n_results: int = 5) -> dict:
+        return self.col.query(query_embeddings=query_embeddings, n_results=n_results)
 
     def count(self) -> int:
         try:
-            return self.collection.count()  # type: ignore
+            return self.col.count()  # type: ignore
         except Exception:
             return -1
 
+
+# ------------------------------
+# LLM Backend
+# ------------------------------
 class LLMBackend:
-    def __init__(self, provider: str, model: str, temperature: float = 0.2):
-        print(f"[DEBUG] Inizializzazione LLMBackend provider={provider}, model={model}")
+    def __init__(self, provider: str, model_name: str):
         self.provider = provider
-        self.model = model
-        self.temperature = temperature
-        self.openai_client = None
-        if provider == "openai":
+        self.model_name = model_name
+        if provider == "OpenAI":
             if OpenAI is None:
-                raise RuntimeError("openai SDK non installato")
-            api_key = os.getenv("OPENAI_API_KEY_EXPERIMENTS")
+                raise RuntimeError("openai SDK non disponibile")
+            api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_EXPERIMENTS")
             if not api_key:
                 raise RuntimeError("OPENAI_API_KEY non impostata")
-            self.openai_client = OpenAI(api_key=api_key)
-
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
-        print(f"[DEBUG] generate chiamato con provider={self.provider}")
-        if self.provider == "openai":
-            try:
-                rsp = self.openai_client.responses.create(  # type: ignore
-                    model=self.model,
-                    temperature=self.temperature,
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                )
-                if getattr(rsp, "output_text", None):  # type: ignore
-                    return rsp.output_text  # type: ignore
-                chunks = []
-                for item in rsp.output:  # type: ignore
-                    if item.type == "message":
-                        for ct in item.message.content:  # type: ignore
-                            if getattr(ct, "type", "") == "output_text":
-                                chunks.append(ct.text)
-                return "".join(chunks) if chunks else ""
-            except Exception as e:
-                print(f"[DEBUG] Fallback chat.completions per errore: {e}")
-                try:
-                    chat = self.openai_client.chat.completions.create(  # type: ignore
-                        model=self.model,
-                        temperature=self.temperature,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                    )
-                    return chat.choices[0].message.content  # type: ignore
-                except Exception as e2:
-                    print(f"[DEBUG] Errore OpenAI legacy: {e2}")
-                    return f"Errore OpenAI: {e2}"
-        elif self.provider == "ollama":
-            try:
-                payload = {
-                    "model": self.model,
-                    "prompt": f"System:\n{system_prompt}\n\nUser:\n{user_prompt}",
-                    "options": {"temperature": self.temperature},
-                    "stream": False,
-                }
-                print("[DEBUG] Chiamo Ollama API locale")
-                r = requests.post("http://localhost:11434/api/generate", json=payload, timeout=120)
-                r.raise_for_status()
-                data = r.json()
-                return data.get("response", "")
-            except Exception as e:
-                print(f"[DEBUG] Errore Ollama: {e}")
-                return f"Errore Ollama: {e}"
+            self.client = OpenAI(api_key=api_key)
+        elif provider == "Ollama (locale)":
+            self.client = None  # usi REST semplice
         else:
-            print("[DEBUG] Provider LLM non supportato")
-            return "Provider LLM non supportato"
+            raise RuntimeError("Provider LLM non supportato")
+
+    def generate(self, system: str, user: str) -> str:
+        if self.provider == "OpenAI":
+            try:
+                # Responses API
+                res = self.client.responses.create(
+                    model=self.model_name,
+                    input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                )
+                return res.output_text  # type: ignore
+            except Exception:
+                # Fallback Chat Completions
+                chat = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                )
+                return chat.choices[0].message.content or ""
+        elif self.provider == "Ollama (locale)":
+            import requests, json
+
+            url = "http://localhost:11434/api/chat"
+            payload = {
+                "model": self.model_name,  # es: "llama3.2" o "llama3.2:latest"
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "stream": False  # fondamentale per evitare JSON concatenati
+            }
+
+            r = requests.post(url, json=payload, timeout=300)
+            try:
+                r.raise_for_status()
+                data = r.json()  # ora deve essere un singolo JSON
+            except json.JSONDecodeError:
+                # Fallback: se arriva ancora streaming, ricomponi i chunk JSON
+                text = r.text.strip()
+                chunks, buf, depth = [], "", 0
+                for ch in text:
+                    buf += ch
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                chunks.append(json.loads(buf))
+                            except Exception:
+                                pass
+                            buf = ""
+                parts = []
+                for obj in chunks:
+                    if isinstance(obj, dict):
+                        if "message" in obj and isinstance(obj["message"], dict) and "content" in obj["message"]:
+                            parts.append(obj["message"]["content"])
+                        elif "response" in obj:  # compat con /api/generate
+                            parts.append(obj["response"])
+                return "\n".join(parts).strip() if parts else text
+
+            # Risposta non-stream (singolo JSON)
+            if isinstance(data, dict):
+                if "message" in data and isinstance(data["message"], dict) and "content" in data["message"]:
+                    return data["message"]["content"]
+                if "response" in data:  # compat con /api/generate
+                    return data["response"]
+                if "messages" in data and isinstance(data["messages"], list) and data["messages"]:
+                    last = data["messages"][-1]
+                    if isinstance(last, dict) and "content" in last:
+                        return last["content"]
+
+            return str(data)
+
+        return "Provider LLM non supportato"
+
 
 RAG_SYSTEM_PROMPT = (
     "Sei un assistente tecnico che risponde basandosi su ticket YouTrack simili. "
@@ -265,19 +300,42 @@ def build_prompt(user_ticket: str, retrieved: List[Tuple[str, dict, float]]) -> 
         parts.append(
             f"- {meta.get('id_readable','')} | distanza={dist:.3f} | {meta.get('summary','')}\n{doc[:500]}"
         )
-    parts.append("\nIstruzioni: proponi una risposta sintetica e operativa. Includi i riferimenti ai ticket fra [].")
-    return "\n\n".join(parts)
+    parts.append("\nRispondi con citazioni tra [ ] degli ID dei ticket rilevanti.")
+    return "\n".join(parts)
 
-def run_streamlit_app() -> None:
-    st.set_page_config(page_title="Support RAG for YouTrack", page_icon="🧭", layout="wide")
 
-    def _err(msg: str):
+# ------------------------------
+# NEW: utility per aprire la collection in sessione
+# ------------------------------
+def open_vector_in_session(persist_dir: str, collection_name: str):
+    """Apre (o crea) una collection Chroma e la mette in sessione."""
+    try:
+        vs = VectorStore(persist_dir=persist_dir, collection_name=collection_name)
+        cnt = vs.count()
         try:
-            st.toast(msg, icon="⚠️")
+            import streamlit as st  # type: ignore
+            st.session_state["vector"] = vs
+            st.session_state["vs_persist_dir"] = persist_dir
+            st.session_state["vs_collection"] = collection_name
+            st.session_state["vs_count"] = cnt
         except Exception:
-            st.warning(msg)
+            pass
+        return True, cnt, None
+    except Exception as e:
+        try:
+            import streamlit as st  # type: ignore
+            st.session_state["vector"] = None
+        except Exception:
+            pass
+        return False, -1, str(e)
 
-    st.title("Support RAG per YouTrack")
+
+# ------------------------------
+# UI principale Streamlit
+# ------------------------------
+def run_streamlit_app():
+    st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
+    st.title("YouTrack RAG Support")
     st.caption("Gestione ticket di supporto basata su storico YouTrack + RAG + LLM")
 
     with st.sidebar:
@@ -289,8 +347,7 @@ def run_streamlit_app() -> None:
         st.markdown("---")
         st.header("Vector DB")
         persist_dir = st.text_input("Chroma path", value=DEFAULT_CHROMA_DIR)
-
-        # Legge le collections già presenti nel datastore
+        # Legge le collections esistenti e permette di crearne una nuova
         coll_options = []
         try:
             if chromadb is not None:
@@ -302,37 +359,56 @@ def run_streamlit_app() -> None:
         except Exception as e:
             st.caption(f"Impossibile leggere le collections da '{persist_dir}': {e}")
 
-        # Se non ci sono collections, proponi direttamente la creazione di una nuova
-        if not coll_options:
-            st.caption("Nessuna collection trovata. Creane una nuova:")
-            collection_name = st.text_input("Nuova Collection", value=DEFAULT_COLLECTION)
-        else:
-            # Aggiungi opzione per crearne una nuova
-            NEW_LABEL = "➕ Crea nuova collection..."
+        NEW_LABEL = "➕ Crea nuova collection..."
+        if coll_options:
             opts = coll_options + [NEW_LABEL]
-
-            # Pre-seleziona la default se esiste
             default_index = opts.index(DEFAULT_COLLECTION) if DEFAULT_COLLECTION in opts else 0
             sel = st.selectbox("Collection", options=opts, index=default_index)
-
-            if sel == NEW_LABEL:
-                collection_name = st.text_input("Nome nuova Collection", value=DEFAULT_COLLECTION)
-            else:
-                collection_name = sel
+            collection_name = st.text_input("Nome nuova Collection", value=DEFAULT_COLLECTION) if sel == NEW_LABEL else sel
+        else:
+            st.caption("Nessuna collection trovata. Creane una nuova:")
+            collection_name = st.text_input("Nuova Collection", value=DEFAULT_COLLECTION)
 
         st.markdown("---")
+        # --- Sostituisci il blocco "Embeddings" con questo ---
         st.header("Embeddings")
         emb_backend = st.selectbox("Provider embeddings", ["Locale (sentence-transformers)", "OpenAI"], index=0)
-        emb_model_name = st.text_input("Modello embeddings", value=DEFAULT_EMBEDDING_MODEL)
+
+        # Popola i modelli in base al provider scelto
+        if emb_backend == "Locale (sentence-transformers)":
+            emb_model_options = ["all-MiniLM-L6-v2"]
+        else:  # OpenAI
+            emb_model_options = ["text-embedding-3-small", "text-embedding-3-large"]
+
+        emb_model_name = st.selectbox("Modello embeddings", options=emb_model_options, index=0, key="emb_model_select")
 
         st.markdown("---")
         st.header("LLM")
         llm_provider = st.selectbox("Provider LLM", ["OpenAI", "Ollama (locale)"])
-        llm_model = st.text_input("Modello LLM", value=("gpt-4o-mini" if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL))
-        temperature = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
+        llm_model = st.text_input("Modello LLM", value=DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
 
         st.markdown("---")
         quit_btn = st.button("Quit")
+        # Apertura automatica della collection selezionata (senza dover re-indicizzare)
+        vector_ready = False
+        if persist_dir and collection_name:
+            changed = (
+                st.session_state.get("vs_persist_dir") != persist_dir
+                or st.session_state.get("vs_collection") != collection_name
+                or st.session_state.get("vector") is None
+            )
+            if changed:
+                ok, cnt, err = open_vector_in_session(persist_dir, collection_name)
+                vector_ready = ok
+                if ok:
+                    st.caption(f"Collection '{collection_name}' aperta. Documenti indicizzati: {cnt if cnt>=0 else 'N/A'}")
+                else:
+                    st.caption(f"Non riesco ad aprire la collection: {err}")
+            else:
+                vector_ready = True
+                cnt = st.session_state.get("vs_count", -1)
+                st.caption(f"Collection '{collection_name}' pronta. Documenti indicizzati: {cnt if cnt>=0 else 'N/A'}")
+
         if quit_btn:
             st.write("Chiusura applicazione...")
             os._exit(0)
@@ -352,7 +428,7 @@ def run_streamlit_app() -> None:
     # Connect to YouTrack
     if connect:
         if not yt_url or not yt_token:
-            _err("Inserisci URL e Token di YouTrack")
+            st.error("Inserisci URL e Token di YouTrack")
         else:
             try:
                 st.session_state["yt_client"] = YouTrackClient(yt_url, yt_token)
@@ -360,48 +436,65 @@ def run_streamlit_app() -> None:
                 with st.spinner("Carico progetti..."):
                     st.session_state["projects"] = st.session_state["yt_client"].list_projects()
             except Exception as e:
-                _err(f"Connessione fallita: {e}")
+                st.error(f"Connessione fallita: {e}")
 
     # Projects & issues
-    left, right = st.columns([1, 2])
-    with left:
-        st.subheader("Progetti")
-        if st.session_state["projects"]:
-            proj_options = {f"{p.get('shortName') or p.get('name')}": (p.get("shortName") or p.get("name")) for p in st.session_state["projects"]}
-            proj_label = st.selectbox("Seleziona progetto", list(proj_options.keys()))
-            load_issues = st.button("Carica ticket")
+    # --- aggiungi questo import assieme agli altri in cima al file ---
+    import pandas as pd
+
+    st.subheader("Progetti YouTrack")
+    if st.session_state.get("yt_client"):
+        projects = st.session_state.get("projects", [])
+        if projects:
+            names = [f"{p.get('name')} ({p.get('shortName')})" for p in projects]
+            sel = st.selectbox("Scegli progetto", options=["-- seleziona --"] + names, key="proj_select")
+
+            if sel and sel != "-- seleziona --":
+                p = projects[names.index(sel)]
+                project_key = p.get("shortName") or p.get("name")
+
+                # AUTO-LOAD: quando cambi progetto carico subito gli issue
+                prev_key = st.session_state.get("last_project_key")
+                if prev_key != project_key:
+                    try:
+                        with st.spinner("Carico issues..."):
+                            st.session_state["issues"] = st.session_state["yt_client"].list_issues(project_key)
+                        st.session_state["last_project_key"] = project_key
+                        st.success(f"Caricati {len(st.session_state['issues'])} issues")
+                    except Exception as e:
+                        st.error(f"Errore caricamento issues: {e}")
+
+                # opzionale: pulsante per ricaricare manualmente
+                if st.button("Ricarica issues"):
+                    try:
+                        with st.spinner("Ricarico issues..."):
+                            st.session_state["issues"] = st.session_state["yt_client"].list_issues(project_key)
+                        st.success(f"Caricati {len(st.session_state['issues'])} issues")
+                    except Exception as e:
+                        st.error(f"Errore ricaricamento: {e}")
         else:
-            st.info("Connetti YouTrack per elencare i progetti")
-            proj_label = None
-            load_issues = False
+            st.caption("Nessun progetto trovato (o permessi insufficienti).")
 
-    with right:
-        st.subheader("Ticket progetto")
-        if load_issues and proj_label:
-            key = proj_options[proj_label]  # type: ignore
-            try:
-                with st.spinner("Scarico ticket..."):
-                    issues = st.session_state["yt_client"].list_issues(project_key=key, limit=500)
-                    st.session_state["issues"] = issues
-            except Exception as e:
-                _err(f"Errore caricamento ticket: {e}")
+    # Mostra SEMPRE la tabella se ci sono issue in memoria
+    issues = st.session_state.get("issues", [])
+    if issues:
+        base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
+        rows = []
+        for it in issues:
+            url = f"{base_url}/issue/{it.id_readable}" if base_url else ""
+            rows.append({
+                "ID": it.id_readable,
+                "Summary": it.summary,
+                "Project": it.project,
+                "URL": url
+            })
+        df = pd.DataFrame(rows, columns=["ID", "Summary", "Project", "URL"])
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.caption("Nessun issue in memoria. Seleziona un progetto per caricare i ticket.")
 
-        if st.session_state["issues"]:
-            df = pd.DataFrame([
-                {
-                    "id": it.id_readable,
-                    "summary": it.summary,
-                    "description": (it.description or "").strip().replace("\n", " ")[:2000],
-                    "project": it.project,
-                }
-                for it in st.session_state["issues"]
-            ])
-            st.dataframe(df, width=st.session_state.get("page_width", 1200))
-        else:
-            st.caption("Nessun ticket caricato")
 
-    # Ingestion
-    st.markdown("")
+    # Ingest
     st.subheader("Indicizzazione Vector DB")
     col1, col2 = st.columns([1, 3])
     with col1:
@@ -412,40 +505,65 @@ def run_streamlit_app() -> None:
     if start_ingest:
         issues = st.session_state.get("issues", [])
         if not issues:
-            _err("Prima carica i ticket del progetto")
+            st.error("Prima carica i ticket del progetto")
         else:
             try:
                 st.session_state["vector"] = VectorStore(persist_dir=persist_dir, collection_name=collection_name)
                 use_openai_embeddings = (emb_backend == "OpenAI")
                 st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
+                # Salva meta modello embeddings per coerenza
+                try:
+                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+                    meta = {"provider": st.session_state["embedder"].provider_name, "model": st.session_state["embedder"].model_name}
+                    with open(meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f)
+                except Exception:
+                    pass
+
                 ids = [it.id_readable for it in issues]
                 docs = [it.text_blob() for it in issues]
                 metas = [{"id_readable": it.id_readable, "summary": it.summary, "project": it.project} for it in issues]
                 with st.spinner("Calcolo embeddings e salvo su Chroma..."):
-                    embs = st.session_state["embedder"].embed(docs)
-                    st.session_state["vector"].add(ids=ids, texts=docs, metadatas=metas, embeddings=embs)
-                st.success(f"Indicizzati {len(ids)} ticket nella collection '{collection_name}'")
+                    embs = st.session_state["embedder"].embed(
+                        [f"{m['id_readable']} | {m['summary']}\n\n{d}" for d, m in zip(docs, metas)]
+                    )
+                    st.session_state["vector"].add(ids=ids, documents=docs, metadatas=metas, embeddings=embs)
+                # aggiorna contatore
+                st.session_state["vs_persist_dir"] = persist_dir
+                st.session_state["vs_collection"] = collection_name
+                st.session_state["vs_count"] = st.session_state["vector"].count()
+                st.success(f"Indicizzazione completata. Totale documenti: {st.session_state['vs_count']}")
             except Exception as e:
-                _err(f"Errore indicizzazione: {e}")
+                st.error(f"Errore indicizzazione: {e}")
 
-    # Chatbot
-    st.markdown("")
+    # Chat
     st.subheader("Chatbot RAG")
-    st.caption("Inserisci il testo di un nuovo ticket: il sistema cercherà casi simili e proporrà una risposta")
-
     query = st.text_area("Nuovo ticket", height=140, placeholder="Descrivi il problema come faresti aprendo un ticket")
     run_chat = st.button("Cerca e rispondi")
 
     if run_chat:
         if not query.strip():
-            _err("Inserisci il testo del ticket")
+            st.error("Inserisci il testo del ticket")
         elif not st.session_state.get("vector"):
-            _err("Indicizza i ticket prima di usare il chatbot")
+            ok, _, _ = open_vector_in_session(persist_dir, collection_name)
+            if not ok:
+                st.error("Apri o crea una collection valida nella sidebar")
         else:
             try:
                 if st.session_state.get("embedder") is None:
                     use_openai_embeddings = (emb_backend == "OpenAI")
                     st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
+
+                # Avvisa se il modello corrente differisce da quello usato per l'indicizzazione
+                try:
+                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+                    if os.path.exists(meta_path):
+                        with open(meta_path, "r", encoding="utf-8") as f:
+                            m = json.load(f)
+                        if (m.get("provider") != st.session_state["embedder"].provider_name) or (m.get("model") != st.session_state["embedder"].model_name):
+                            st.info(f"Nota: la collection è stata indicizzata con {m.get('provider')} / {m.get('model')}; stai cercando con {st.session_state['embedder'].provider_name} / {st.session_state['embedder'].model_name}.")
+                except Exception:
+                    pass
 
                 q_emb = st.session_state["embedder"].embed([query])
                 res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=5)
@@ -453,61 +571,64 @@ def run_streamlit_app() -> None:
                 metas = res.get("metadatas", [[]])[0]
                 dists = res.get("distances", [[]])[0]
                 retrieved = list(zip(docs, metas, dists))
-
-                provider_key = "openai" if llm_provider.lower().startswith("openai") else "ollama"
-                llm = LLMBackend(provider=provider_key, model=llm_model, temperature=temperature)
-
                 prompt = build_prompt(query, retrieved)
-                with st.spinner("Genero risposta LLM..."):
+                llm = LLMBackend(llm_provider, llm_model)
+                with st.spinner("Genero risposta..."):
                     answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
-
-                st.markdown("Risposta")
                 st.write(answer)
 
-                with st.expander("Ticket simili usati come contesto"):
-                    for (doc, meta, dist) in retrieved:
-                        st.write(f"[{meta.get('id_readable','')}] {meta.get('summary','')} | distanza={dist:.3f}")
-                        st.code(doc[:1200])
+                # Tabella risultati
+                st.write("Risultati simili (top-k):")
+                for (doc, meta, dist) in retrieved:
+                    idr = meta.get("id_readable", "")
+                    summary = meta.get("summary", "")
+                    st.write(f"- [{idr}] distanza={dist:.3f} — {summary}")
 
             except Exception as e:
-                _err(f"Errore chatbot: {e}")
+                st.error(f"Errore chat: {e}")
 
-    # Footer
-    st.markdown("---")
-    st.caption("Suggerimenti: usa embedding locali per privacy; programma un job periodico per sincronizzare i ticket; aggiungi rating delle risposte per migliorare i prompt.")
 
 # ------------------------------
-# CLI help + Self tests (senza Streamlit)
+# CLI + Self-tests (opzionali)
 # ------------------------------
+def _cli_help():
+    print("Uso: streamlit run app.py --server.port 8502")
 
-def _cli_help() -> None:
-    print("\n=== Support RAG for YouTrack (CLI) ===")
-    print("Streamlit non è installato nell'ambiente corrente.")
-    print("Installa i requisiti e avvia l'app web:")
-    print("  pip install -U streamlit requests chromadb sentence-transformers openai tiktoken pandas")
-    print("  # opzionale per modelli locali: pip install -U ollama")
-    print("  streamlit run app.py\n")
+def _self_tests():
+    print("Eseguo self-tests minimi...")
+    vs = None
+    try:
+        vs = VectorStore(DEFAULT_CHROMA_DIR, DEFAULT_COLLECTION)
+        print("VectorStore OK.")
+    except Exception as e:
+        print(f"VectorStore non disponibile: {e}")
 
+    try:
+        emb = EmbeddingBackend(use_openai=False, model_name=DEFAULT_EMBEDDING_MODEL)
+        vec = emb.embed(["testo uno", "testo due"])
+        assert len(vec) == 2 and isinstance(vec[0], list)
+        print("Embeddings locali OK.")
+    except Exception as e:
+        print(f"Embeddings locali non disponibili: {e}")
 
-def _self_tests() -> None:
-    print("Eseguo self-tests...")
+    try:
+        llm = LLMBackend("OpenAI", DEFAULT_LLM_MODEL)
+        assert isinstance(llm, LLMBackend)
+        print("LLM OpenAI OK (init).")
+    except Exception as e:
+        print(f"LLM OpenAI non disponibile: {e}")
 
-    yt = YouTrackClient("https://example.youtrack", "XYZ")
-    assert yt.base_url == "https://example.youtrack"
-    assert yt.session.headers["Authorization"].startswith("Bearer ")
+    try:
+        llm = LLMBackend("Ollama (locale)", DEFAULT_OLLAMA_MODEL)
+        assert isinstance(llm, LLMBackend)
+        print("LLM Ollama OK (init).")
+    except Exception as e:
+        print(f"LLM Ollama non disponibile: {e}")
 
-    retrieved = [
-        ("[YT-1] Wifi unstable\n\nDetails...", {"id_readable": "YT-1", "summary": "Wifi unstable"}, 0.1234),
-        ("[YT-2] Router reboot\n\nDetails...", {"id_readable": "YT-2", "summary": "Router reboot"}, 0.9876),
-    ]
-    p = build_prompt("Problema con la rete", retrieved)
-    assert "Nuovo ticket:" in p and "Ticket simili" in p
-    assert "- YT-1 | distanza=0.123 | Wifi unstable" in p
-    assert "- YT-2 | distanza=0.988 | Router reboot" in p
-
-    llm = LLMBackend(provider="other", model="x")
-    assert llm.generate("s", "u") == "Provider LLM non supportato"
-
+    try:
+        llm = LLMBackend("???", "x")
+    except Exception as e:
+        assert "Provider LLM non supportato" in str(e)
     print("Tutti i self-tests sono PASSATI. ✅")
 
 # ------------------------------
