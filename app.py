@@ -481,23 +481,27 @@ def run_streamlit_app():
             st.caption("Nessun progetto trovato (o permessi insufficienti).")
 
     # Mostra SEMPRE la tabella se ci sono issue in memoria
+    # --- sostituisci il blocco che mostra la tabella degli issue con questo ---
     issues = st.session_state.get("issues", [])
     if issues:
         base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
-        rows = []
+
+        # Costruisci una tabella Markdown con ID cliccabile e senza Project/Apri
+        lines = []
+        lines.append("| ID | Summary |")
+        lines.append("|---|---|")
         for it in issues:
             url = f"{base_url}/issue/{it.id_readable}" if base_url else ""
-            rows.append({
-                "ID": it.id_readable,
-                "Summary": it.summary,
-                "Project": it.project,
-                "URL": url
-            })
-        df = pd.DataFrame(rows, columns=["ID", "Summary", "Project", "URL"])
-        st.dataframe(df, use_container_width=True)
+            id_cell = f"[{it.id_readable}]({url})" if url else it.id_readable
+            # taglia summary lunghissime (facoltativo)
+            summary = it.summary.strip().replace("\n", " ")
+            if len(summary) > 160:
+                summary = summary[:157] + "..."
+            lines.append(f"| {id_cell} | {summary} |")
+
+        st.markdown("\n".join(lines), unsafe_allow_html=False)
     else:
         st.caption("Nessun issue in memoria. Seleziona un progetto per caricare i ticket.")
-
 
     # Ingest
     st.subheader("Indicizzazione Vector DB")
