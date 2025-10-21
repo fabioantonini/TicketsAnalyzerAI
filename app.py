@@ -388,6 +388,11 @@ def run_streamlit_app():
         llm_temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.05)
 
         st.markdown("---")
+        st.header("Chat settings")
+        top_k = st.slider("Numero risultati (k)", min_value=1, max_value=20, value=5, step=1)
+        show_distances = st.checkbox("Mostra distanza nei risultati", value=True)
+
+        st.markdown("---")
         quit_btn = st.button("Quit")
         # Apertura automatica della collection selezionata (senza dover re-indicizzare)
         vector_ready = False
@@ -566,7 +571,7 @@ def run_streamlit_app():
                     pass
 
                 q_emb = st.session_state["embedder"].embed([query])
-                res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=5)
+                res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=top_k)
                 docs = res.get("documents", [[]])[0]
                 metas = res.get("metadatas", [[]])[0]
                 dists = res.get("distances", [[]])[0]
@@ -577,13 +582,23 @@ def run_streamlit_app():
                     answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
                 st.write(answer)
 
-                # Tabella risultati
+                # risultati simili (cliccabili)
+                base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
                 st.write("Risultati simili (top-k):")
                 for (doc, meta, dist) in retrieved:
                     idr = meta.get("id_readable", "")
                     summary = meta.get("summary", "")
-                    st.write(f"- [{idr}] distanza={dist:.3f} — {summary}")
-
+                    url = f"{base_url}/issue/{idr}" if base_url and idr else ""
+                    if url:
+                        if show_distances:
+                            st.markdown(f"- [{idr}]({url}) — distanza={dist:.3f} — {summary}")
+                        else:
+                            st.markdown(f"- [{idr}]({url}) — {summary}")
+                    else:
+                        if show_distances:
+                            st.write(f"- {idr} — distanza={dist:.3f} — {summary}")
+                        else:
+                            st.write(f"- {idr} — {summary}")
             except Exception as e:
                 st.error(f"Errore chat: {e}")
 
