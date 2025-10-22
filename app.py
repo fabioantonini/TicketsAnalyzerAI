@@ -1059,7 +1059,6 @@ def run_streamlit_app():
                     base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
                     st.write("Risultati simili (top-k, con provenienza):")
                     for (doc, meta, dist, src) in merged:
-                        # --- Rendering dei risultati KB (link robusto) ---
                         if src == "KB":
                             idr = meta.get("id_readable", "")
                             summary = meta.get("summary", "")
@@ -1071,11 +1070,28 @@ def run_streamlit_app():
                                 else:
                                     st.markdown(f"- [KB] [{idr}]({url}) — {summary}")
                             else:
-                                # senza URL, niente Markdown per il link
                                 if show_distances:
                                     st.write(f"- [KB] {idr} — distanza={dist:.3f} — {summary}")
                                 else:
                                     st.write(f"- [KB] {idr} — {summary}")
+
+                        else:  # MEM
+                            # anteprima su una riga, niente bullet annidati
+                            preview = one_line_preview(doc, maxlen=160)
+                            proj = meta.get("project", "")
+                            raw_tags = meta.get("tags", "")
+                            tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
+                            extra = f" (tags: {tags})" if tags else (f" (proj: {proj})" if proj else "")
+                            if show_distances:
+                                st.markdown(f"- [MEM]{extra} — distanza={dist:.3f} — {preview}")
+                            else:
+                                st.markdown(f"- [MEM]{extra} — {preview}")
+
+                            # (opzionale) espandi playbook completo
+                            if st.session_state.get("mem_show_full", False):
+                                with st.expander("Mostra playbook completo"):
+                                    st.markdown(doc)
+
                 else:
                     st.caption("Nessun risultato sufficientemente simile (sotto soglia).")
 
