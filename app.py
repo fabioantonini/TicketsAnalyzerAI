@@ -494,6 +494,14 @@ def run_streamlit_app():
         top_k = st.slider("Numero risultati (k)", min_value=1, max_value=20, value=3, step=1)
         show_distances = st.checkbox("Mostra distanza nei risultati", value=True)
 
+        st.header("Debug")
+        show_prompt = st.checkbox(
+            "Mostra prompt LLM",
+            value=False,
+            help="Se attivo, visualizza il prompt completo inviato al modello dopo il retrieval."
+        )
+        st.session_state["show_prompt"] = show_prompt
+
         st.markdown("---")
         quit_btn = st.button("Quit")
         # Apertura automatica della collection selezionata (senza dover re-indicizzare)
@@ -710,6 +718,10 @@ def run_streamlit_app():
                     prompt = build_prompt(query, retrieved)
                 else:
                     prompt = f"Nuovo ticket:\n{query.strip()}\n\nNessun ticket simile è stato trovato nel knowledge base."
+
+                if st.session_state.get("show_prompt", False):
+                    with st.expander("Prompt inviato al LLM", expanded=False):
+                        st.code(prompt, language="markdown")
 
                 # LLM
                 llm = LLMBackend(llm_provider, llm_model, temperature=llm_temperature)
