@@ -379,8 +379,46 @@ def run_streamlit_app():
             st.caption("Nessuna collection trovata. Creane una nuova:")
             collection_name = st.text_input("Nuova Collection", value=DEFAULT_COLLECTION)
 
+        # Pulsante per eliminare la collection selezionata
+        st.markdown("—")
+        st.subheader("Gestione collection")
+        is_existing_collection = "coll_options" in locals() and (collection_name in coll_options)
+
+        del_confirm = st.checkbox(
+            f"Conferma eliminazione di '{collection_name}'",
+            value=False,
+            disabled=not is_existing_collection,
+            help="Questa operazione rimuove definitivamente la collection dal datastore."
+        )
+
+        if st.button(
+            "Elimina collection",
+            type="secondary",
+            disabled=not is_existing_collection,
+            help="Rimuove definitivamente la collection selezionata dal vector datastore."
+        ):
+            if not del_confirm:
+                st.warning("Spunta la casella di conferma per procedere con l'eliminazione.")
+            else:
+                try:
+                    _client = chromadb.PersistentClient(
+                        path=persist_dir,
+                        settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
+                    )
+                    _client.delete_collection(name=collection_name)
+
+                    # Pulisci lo stato della sessione se puntava alla collection appena rimossa
+                    if st.session_state.get("vs_collection") == collection_name:
+                        st.session_state["vector"] = None
+                        st.session_state["vs_collection"] = None
+                        st.session_state["vs_count"] = 0
+
+                    st.success(f"Collection '{collection_name}' eliminata con successo.")
+                    st.rerun()  # ricarica l'app per aggiornare la dropbox
+                except Exception as e:
+                    st.error(f"Errore durante l'eliminazione: {e}")
+
         st.markdown("---")
-        # --- Sostituisci il blocco "Embeddings" con questo ---
         st.header("Embeddings")
         emb_backend = st.selectbox("Provider embeddings", ["Locale (sentence-transformers)", "OpenAI"], index=0)
 
