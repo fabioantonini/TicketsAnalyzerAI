@@ -694,6 +694,11 @@ def run_streamlit_app():
         st.markdown("---")
         st.header("Memoria soluzioni (BETA)")
 
+        st.checkbox(
+            "Mostra testo completo dei playbook (MEM)",
+            key="mem_show_full",
+            help="Se attivo, sotto ogni risultato MEM compare un expander con l'intero playbook."
+        )
         enable_memory = st.checkbox(
             "Abilita memory 'playbook' (collection separata)",
             value=st.session_state.get("enable_memory", False),
@@ -1087,9 +1092,10 @@ def run_streamlit_app():
                             else:
                                 st.markdown(f"- [MEM]{extra} — {preview}")
 
-                            # (opzionale) espandi playbook completo
+                            # Expander opzionale con il testo completo
                             if st.session_state.get("mem_show_full", False):
-                                with st.expander("Mostra playbook completo"):
+                                with st.expander("Playbook completo [MEM]", expanded=False):
+                                    # il playbook può contenere bullet markdown; renderizziamo come markdown
                                     st.markdown(doc)
 
                 else:
