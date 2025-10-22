@@ -146,9 +146,9 @@ class EmbeddingBackend:
         if use_openai:
             if OpenAI is None:
                 raise RuntimeError("openai SDK non disponibile")
-            api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_EXPERIMENTS")
+            api_key = get_openai_key()
             if not api_key:
-                raise RuntimeError("OPENAI_API_KEY non impostata")
+                raise RuntimeError("OPENAI_API_KEY non impostata (inseriscila nella sidebar o come env var)")
             self.client = OpenAI(api_key=api_key)
         else:
             if SentenceTransformer is None:
@@ -191,6 +191,17 @@ class VectorStore:
         except Exception:
             return -1
 
+def get_openai_key() -> Optional[str]:
+    # override da UI se presente
+    try:
+        import streamlit as st  # type: ignore
+        ui_key = st.session_state.get("openai_key")
+        if ui_key:
+            return ui_key
+    except Exception:
+        pass
+    # fallback: environment variables già usate in app
+    return os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_EXPERIMENTS")
 
 # ------------------------------
 # LLM Backend
@@ -203,9 +214,9 @@ class LLMBackend:
         if provider == "OpenAI":
             if OpenAI is None:
                 raise RuntimeError("openai SDK non disponibile")
-            api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_EXPERIMENTS")
+            api_key = get_openai_key()
             if not api_key:
-                raise RuntimeError("OPENAI_API_KEY non impostata")
+                raise RuntimeError("OPENAI_API_KEY non impostata (inseriscila nella sidebar o come env var)")
             self.client = OpenAI(api_key=api_key)
         elif provider == "Ollama (locale)":
             self.client = None  # REST semplice
@@ -386,6 +397,25 @@ def run_streamlit_app():
         llm_provider = st.selectbox("Provider LLM", ["OpenAI", "Ollama (locale)"])
         llm_model = st.text_input("Modello LLM", value=DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
         llm_temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.05)
+        # --- [SIDEBAR > API Keys] ---
+        st.header("API Keys")
+        openai_needed = (emb_backend == "OpenAI") or (llm_provider == "OpenAI")
+
+        openai_key_input = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=st.session_state.get("openai_key", ""),
+            disabled=not openai_needed,
+            help="Usata solo se scegli OpenAI come provider per Embeddings o LLM."
+        )
+
+        if openai_key_input:
+            st.session_state["openai_key"] = openai_key_input
+
+        if not openai_needed:
+            st.caption("OpenAI API Key non necessaria: stai usando solo provider locali (Ollama / sentence-transformers).")
+        elif (llm_provider == "Ollama (locale)") and (emb_backend == "OpenAI"):
+            st.info("Stai usando: LLM = Ollama, Embeddings = OpenAI → la chiave verrà usata solo per gli embeddings.")
 
         st.markdown("---")
         st.header("Chat settings")
