@@ -457,6 +457,13 @@ def run_streamlit_app():
 
         emb_model_name = st.selectbox("Modello embeddings", options=emb_model_options, index=0, key="emb_model_select")
 
+        st.header("Retrieval")
+        max_distance = st.slider(
+            "Soglia massima distanza (cosine)",
+            min_value=0.1, max_value=2.0, value=0.9, step=0.05,
+            help="Più bassa = risultati più simili. Con Chroma/cosine, 0 è identico, valori alti sono meno simili."
+        )
+
         st.markdown("---")
         st.header("LLM")
         llm_provider = st.selectbox("Provider LLM", ["OpenAI", "Ollama (locale)"])
@@ -676,11 +683,41 @@ def run_streamlit_app():
                     pass
 
                 q_emb = st.session_state["embedder"].embed([query])
-                res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=top_k)
-                docs = res.get("documents", [[]])[0]
+                res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=5)
+                docs  = res.get("documents", [[]])[0]
                 metas = res.get("metadatas", [[]])[0]
                 dists = res.get("distances", [[]])[0]
-                retrieved = list(zip(docs, metas, dists))
+
+                # Filtra per distanza: tieni solo i risultati davvero simili
+                # Usa lo slider 'max_distance' se l'hai aggiunto; in alternativa imposta un default, es: 0.9
+                DIST_MAX = max_distance if "max_distance" in locals() else 0.9
+                retrieved = [
+                    (doc, meta, dist)
+                    for doc, meta, dist in zip(docs, metas, dists)
+                    if dist is not None and dist <= DIST_MAX
+                ]
+
+                # Costruisci il prompt in base a ciò che è passato il filtro
+                if retrieved:
+                    prompt = build_prompt(query, retrieved)
+                else:
+                    # Nessun match utile: costruisci un prompt “vuoto” per far rispondere al LLM senza suggerire falsi riferimenti
+                    prompt = f"Nuovo ticket:\n{query.strip()}\n\nNessun ticket simile è stato trovato nel knowledge base."
+                    
+                llm = LLMBackend(llm_provider, llm_model, temperature=llm_temperature)
+                with st.spinner("Genero risposta..."):
+                    answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
+                st.write(answer)
+
+                # Mostra la lista simili SOLO se abbiamo almeno un risultato sotto soglia
+                if retrieved:
+                    st.write("Risultati simili (top-k):")
+                    for (doc, meta, dist) in retrieved:
+                        idr = meta.get("id_readable", "")
+                        summary = meta.get("summary", "")
+                        st.write(f"- {idr} — distanza={dist:.3f} — {summary}")
+                else:
+                    st.caption("Nessun risultato sufficientemente simile (sotto soglia).")
                 prompt = build_prompt(query, retrieved)
                 llm = LLMBackend(llm_provider, llm_model, temperature=llm_temperature)
                 with st.spinner("Genero risposta..."):
