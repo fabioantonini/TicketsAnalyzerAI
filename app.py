@@ -25,6 +25,50 @@ import typing
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
+# === Sticky prefs (Livello A) ===
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+PREFS_PATH = os.path.join(APP_DIR, ".app_prefs.json")  # file locale, NON contiene segreti
+
+NON_SENSITIVE_PREF_KEYS = {
+    "yt_url",
+    "persist_dir",
+    "emb_backend",
+    "emb_model_name",
+    "llm_provider",
+    "llm_model",
+    "llm_temperature",
+    "max_distance",
+    "show_prompt",
+    "collection_selected",
+    "new_collection_name",
+}
+
+def load_prefs() -> dict:
+    try:
+        import json, os
+        if os.path.exists(PREFS_PATH):
+            with open(PREFS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {k: v for k, v in data.items() if k in NON_SENSITIVE_PREF_KEYS}
+    except Exception:
+        pass
+    return {}
+
+def save_prefs(prefs: dict):
+    try:
+        import json
+        clean = {k: v for k, v in prefs.items() if k in NON_SENSITIVE_PREF_KEYS}
+        with open(PREFS_PATH, "w", encoding="utf-8") as f:
+            json.dump(clean, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[WARN] save_prefs: {e}")
+
+def init_prefs_in_session():
+    # carica da file una sola volta
+    if "prefs_loaded" not in st.session_state:
+        st.session_state["prefs_loaded"] = True
+        st.session_state["prefs"] = load_prefs()
+
 # ------------------------------
 # Try imports con fallback/shim
 # ------------------------------
@@ -344,19 +388,23 @@ def open_vector_in_session(persist_dir: str, collection_name: str):
 # UI principale Streamlit
 # ------------------------------
 def run_streamlit_app():
+    init_prefs_in_session()
+    prefs = st.session_state.get("prefs", {})
+
     st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
     st.title("YouTrack RAG Support")
     st.caption("Gestione ticket di supporto basata su storico YouTrack + RAG + LLM")
 
     with st.sidebar:
         st.header("Connessione YouTrack")
-        yt_url = st.text_input("Server URL", placeholder="https://<org>.myjetbrains.com/youtrack")
+        yt_url = st.text_input("Server URL", value=prefs.get("yt_url", ""), placeholder="https://<org>.myjetbrains.com/youtrack")
         yt_token = st.text_input("Token (Bearer)", type="password")
         connect = st.button("Connetti YouTrack")
 
+
         st.markdown("---")
         st.header("Vector DB")
-        persist_dir = st.text_input("Chroma path", value=DEFAULT_CHROMA_DIR, key="persist_dir")
+        persist_dir = st.text_input("Chroma path", value=prefs.get("persist_dir", DEFAULT_CHROMA_DIR), key="persist_dir")
 
         # Leggi le collections esistenti
         coll_options = []
@@ -431,44 +479,123 @@ def run_streamlit_app():
                     )
                     _client.delete_collection(name=collection_name)
 
+                    # Rimuovi eventuale meta della collection (provider/modello)
+                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+                    try:
+                        if os.path.exists(meta_path):
+                            os.remove(meta_path)
+                    except Exception:
+                        pass  # non bloccare l'UX se non riesci a cancellare il meta
+
                     # Pulisci stato se puntava alla collection rimossa
                     if st.session_state.get("vs_collection") == collection_name:
                         st.session_state["vector"] = None
                         st.session_state["vs_collection"] = None
                         st.session_state["vs_count"] = 0
+                        st.session_state["vs_persist_dir"] = persist_dir  # opzionale: mantieni il path corrente
+
+                    # Svuota eventuali risultati/issue caricati (opzionale ma consigliato)
+                    st.session_state["issues"] = []
 
                     # Rimuovi selezione e nome nuova dalla sessione
                     st.session_state["collection_selected"] = None
                     st.session_state["new_collection_name"] = DEFAULT_COLLECTION
+
+                    # Aggiorna anche le sticky prefs, se presenti
+                    prefs = st.session_state.get("prefs", {})
+                    prefs["collection_selected"] = None
+                    prefs["new_collection_name"] = DEFAULT_COLLECTION
+                    st.session_state["prefs"] = prefs
+                    # Se hai definito save_prefs(), aggiorna il file su disco (safe no-op se non c'è)
+                    try:
+                        save_prefs(prefs)
+                    except Exception:
+                        pass
+
                     st.success(f"Collection '{collection_name}' eliminata con successo.")
                     st.rerun()
+
                 except Exception as e:
                     st.error(f"Errore durante l'eliminazione: {e}")
 
+
         st.markdown("---")
+        # --- [SIDEBAR > Embeddings] sostituisci il blocco attuale con questo ---
+
         st.header("Embeddings")
-        emb_backend = st.selectbox("Provider embeddings", ["Locale (sentence-transformers)", "OpenAI"], index=0)
 
-        # Popola i modelli in base al provider scelto
-        if emb_backend == "Locale (sentence-transformers)":
-            emb_model_options = ["all-MiniLM-L6-v2"]
-        else:  # OpenAI
-            emb_model_options = ["text-embedding-3-small", "text-embedding-3-large"]
-
-        emb_model_name = st.selectbox("Modello embeddings", options=emb_model_options, index=0, key="emb_model_select")
-
-        st.header("Retrieval")
-        max_distance = st.slider(
-            "Soglia massima distanza (cosine)",
-            min_value=0.1, max_value=2.0, value=1.0, step=0.05,
-            help="Più bassa = risultati più simili. Con Chroma/cosine, 0 è identico, valori alti sono meno simili."
+        emb_provider_key = "emb_provider_select"
+        emb_backend = st.selectbox(
+            "Provider embeddings",
+            ["Locale (sentence-transformers)", "OpenAI"],
+            index=(0 if prefs.get("emb_backend", "Locale (sentence-transformers)") == "Locale (sentence-transformers)" else 1),
+            key=emb_provider_key,
         )
+
+        # Reset del modello se cambia il provider
+        prev_emb_backend = st.session_state.get("last_emb_backend")
+        if prev_emb_backend != emb_backend:
+            st.session_state["last_emb_backend"] = emb_backend
+            st.session_state["emb_model"] = "all-MiniLM-L6-v2" if emb_backend == "Locale (sentence-transformers)" else "text-embedding-3-small"
+
+        # Default iniziale: prefs solo al primo giro
+        if "emb_model" not in st.session_state:
+            st.session_state["emb_model"] = prefs.get(
+                "emb_model_name",
+                "all-MiniLM-L6-v2" if emb_backend == "Locale (sentence-transformers)" else "text-embedding-3-small"
+            )
+
+        # Opzioni in base al provider
+        emb_model_options = ["all-MiniLM-L6-v2"] if emb_backend == "Locale (sentence-transformers)" else ["text-embedding-3-small", "text-embedding-3-large"]
+
+        # Se il valore corrente non è tra le opzioni (p.es. dopo switch), riallinea
+        if st.session_state["emb_model"] not in emb_model_options:
+            st.session_state["emb_model"] = emb_model_options[0]
+
+        emb_model_name = st.selectbox(
+            "Modello embeddings",
+            options=emb_model_options,
+            index=emb_model_options.index(st.session_state["emb_model"]),
+            key="emb_model"
+        )
+        
+        st.header("Retrieval")
+        if "max_distance" not in st.session_state:
+            st.session_state["max_distance"] = float(prefs.get("max_distance", 0.9))
+        max_distance = st.slider("Soglia massima distanza (cosine)", 0.1, 2.0, st.session_state["max_distance"], 0.05)
+        st.session_state["max_distance"] = max_distance
 
         st.markdown("---")
         st.header("LLM")
-        llm_provider = st.selectbox("Provider LLM", ["OpenAI", "Ollama (locale)"])
-        llm_model = st.text_input("Modello LLM", value=DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
-        llm_temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.05)
+        llm_provider = st.selectbox(
+            "Provider LLM",
+            ["OpenAI", "Ollama (locale)"],
+            index=(0 if prefs.get("llm_provider", "OpenAI") == "OpenAI" else 1),
+            key="llm_provider_select",
+        )
+
+        # Se il provider cambia, resetta il modello al default del provider
+        prev_provider = st.session_state.get("last_llm_provider")
+        if prev_provider != llm_provider:
+            st.session_state["last_llm_provider"] = llm_provider
+            st.session_state["llm_model"] = (
+                DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL
+            )
+
+        # Default iniziale: prende dalle prefs SOLO al primo giro, poi governa lo stato
+        llm_model_default = (DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
+        if "llm_model" not in st.session_state:
+            st.session_state["llm_model"] = prefs.get("llm_model", llm_model_default)
+
+        # Campo controllato via session_state: così il reset al cambio provider ha effetto
+        llm_model = st.text_input("Modello LLM", key="llm_model")
+
+        # Slider temperatura invariato (puoi lasciarlo com’è)
+        if "llm_temperature" not in st.session_state:
+            st.session_state["llm_temperature"] = float(prefs.get("llm_temperature", 0.2))
+        llm_temperature = st.slider("Temperature", 0.0, 1.5, st.session_state["llm_temperature"], 0.05)
+        st.session_state["llm_temperature"] = llm_temperature
+
         # --- [SIDEBAR > API Keys] ---
         st.header("API Keys")
         openai_needed = (emb_backend == "OpenAI") or (llm_provider == "OpenAI")
@@ -495,12 +622,45 @@ def run_streamlit_app():
         show_distances = st.checkbox("Mostra distanza nei risultati", value=True)
 
         st.header("Debug")
-        show_prompt = st.checkbox(
-            "Mostra prompt LLM",
-            value=False,
-            help="Se attivo, visualizza il prompt completo inviato al modello dopo il retrieval."
-        )
+        if "show_prompt" not in st.session_state:
+            st.session_state["show_prompt"] = bool(prefs.get("show_prompt", False))
+        show_prompt = st.checkbox("Mostra prompt LLM", value=st.session_state["show_prompt"])
         st.session_state["show_prompt"] = show_prompt
+
+        st.markdown("---")
+        st.subheader("Preferenze")
+        prefs_enabled = st.checkbox("Abilita memoria preferenze (locale)", value=True, help="Salva impostazioni non sensibili in .app_prefs.json")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Salva preferenze"):
+                if prefs_enabled:
+                    save_prefs({
+                        "yt_url": yt_url,
+                        "persist_dir": persist_dir,
+                        "emb_backend": st.session_state.get("last_emb_backend", emb_backend),
+                        "emb_model_name": st.session_state.get("emb_model"),
+                        "llm_provider": st.session_state.get("last_llm_provider", llm_provider),
+                        "llm_model": st.session_state.get("llm_model"),
+                        "llm_temperature": st.session_state.get("llm_temperature", llm_temperature),
+                        "max_distance": st.session_state.get("max_distance", max_distance),
+                        "show_prompt": st.session_state.get("show_prompt", show_prompt),
+                        "collection_selected": st.session_state.get("collection_selected"),
+                        "new_collection_name": st.session_state.get("new_collection_name"),
+                    })
+                    st.session_state["prefs"] = load_prefs()
+                    st.success("Preferenze salvate.")
+                else:
+                    st.info("Memoria preferenze disabilitata.")
+        with c2:
+            if st.button("Ripristina default"):
+                try:
+                    if os.path.exists(PREFS_PATH):
+                        os.remove(PREFS_PATH)
+                    st.session_state["prefs"] = {}
+                    st.success("Preferenze ripristinate. Ricarica la pagina per vedere i default.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore nel ripristino: {e}")
 
         st.markdown("---")
         quit_btn = st.button("Quit")
@@ -561,7 +721,6 @@ def run_streamlit_app():
 
     # Projects & issues
     # --- aggiungi questo import assieme agli altri in cima al file ---
-    import pandas as pd
 
     st.subheader("Progetti YouTrack")
     if st.session_state.get("yt_client"):
@@ -706,7 +865,7 @@ def run_streamlit_app():
                 dists = res.get("distances", [[]])[0]
 
                 # Filtra risultati per distanza
-                DIST_MAX = max_distance if "max_distance" in locals() else 0.9
+                DIST_MAX = max_distance
                 retrieved = [
                     (doc, meta, dist)
                     for doc, meta, dist in zip(docs, metas, dists)
