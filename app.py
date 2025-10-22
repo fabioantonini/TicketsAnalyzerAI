@@ -24,6 +24,7 @@ import uuid
 import typing
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+import re
 
 # === Sticky prefs (Livello A) ===
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +67,16 @@ def init_prefs_in_session():
     if "prefs_loaded" not in st.session_state:
         st.session_state["prefs_loaded"] = True
         st.session_state["prefs"] = load_prefs()
+
+def one_line_preview(text: str, maxlen: int = 160) -> str:
+    """Rende il testo su una riga, rimuove bullet/extra spazi e tronca."""
+    if not text:
+        return ""
+    s = text.replace("\r", " ").replace("\n", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    # rimuovi marker di lista a inizio testo (es. "- ", "* ", "• ")
+    s = re.sub(r"^[-\*\u2022]\s+", "", s)
+    return (s[:maxlen] + "…") if len(s) > maxlen else s
 
 # === Solution Memory (Livello B) ===
 MEM_COLLECTION = "memories"        # collection Chroma separata per i playbook
@@ -699,6 +710,8 @@ def run_streamlit_app():
 
         c_mem1, c_mem2 = st.columns(2)
         with c_mem1:
+            if st.session_state.pop("open_memories_after_save", False):
+                st.session_state["show_memories"] = True
             st.checkbox(
                 "Mostra playbook salvati",
                 key="show_memories",
@@ -998,7 +1011,7 @@ def run_streamlit_app():
                         mem_metas = mem_res.get("metadatas", [[]])[0]
                         mem_dists = mem_res.get("distances", [[]])[0]
 
-                        DIST_MAX_MEM = max(0.0, DIST_MAX_KB - 0.05)  # leggermente più stretta
+                        DIST_MAX_MEM = DIST_MAX_KB
                         now = now_ts()
                         for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
                             if dist is None:
@@ -1046,25 +1059,23 @@ def run_streamlit_app():
                     base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
                     st.write("Risultati simili (top-k, con provenienza):")
                     for (doc, meta, dist, src) in merged:
+                        # --- Rendering dei risultati KB (link robusto) ---
                         if src == "KB":
                             idr = meta.get("id_readable", "")
                             summary = meta.get("summary", "")
                             url = f"{base_url}/issue/{idr}" if base_url and idr else ""
-                            label = f"[KB] {idr}" if idr else "[KB]"
+
                             if url:
-                                if show_distances: st.markdown(f"- [{label}]({url}) — distanza={dist:.3f} — {summary}")
-                                else:              st.markdown(f"- [{label}]({url}) — {summary}")
+                                if show_distances:
+                                    st.markdown(f"- [KB] [{idr}]({url}) — distanza={dist:.3f} — {summary}")
+                                else:
+                                    st.markdown(f"- [KB] [{idr}]({url}) — {summary}")
                             else:
-                                if show_distances: st.write(f"- {label} — distanza={dist:.3f} — {summary}")
-                                else:              st.write(f"- {label} — {summary}")
-                        else:
-                            preview = (doc[:120] + "…") if len(doc) > 120 else doc
-                            proj = meta.get("project", "")
-                            raw_tags = meta.get("tags", "")
-                            tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
-                            extra = f" (tags: {tags})" if tags else (f" (proj: {proj})" if proj else "")
-                            if show_distances: st.markdown(f"- [MEM]{extra} — distanza={dist:.3f} — {preview}")
-                            else:              st.markdown(f"- [MEM]{extra} — {preview}")
+                                # senza URL, niente Markdown per il link
+                                if show_distances:
+                                    st.write(f"- [KB] {idr} — distanza={dist:.3f} — {summary}")
+                                else:
+                                    st.write(f"- [KB] {idr} — {summary}")
                 else:
                     st.caption("Nessun risultato sufficientemente simile (sotto soglia).")
 
@@ -1126,7 +1137,7 @@ def run_streamlit_app():
 
                     st.caption(f"Salvato playbook in path='{persist_dir}', collection='{MEM_COLLECTION}'")
                     st.success("Playbook salvato nella memoria.")
-                    st.session_state["show_memories"] = True   # apri subito la vista
+                    st.session_state["open_memories_after_save"] = True
                     st.rerun()                                  # refresh tabella
             except Exception as e:
                 st.error(f"Errore salvataggio playbook: {e}")
