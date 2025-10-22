@@ -140,3 +140,15 @@ In corso / raccomandazioni
 ## 📄 Licenza
 
 Vedi file LICENSE se presente nel repository.
+
+## 🌱 Opzioni future
+
+### LLM da Hugging Face
+- **Server OpenAI‑compatible (consigliato)**: esponi il modello HF tramite un server compatibile con le API OpenAI (es. vLLM/TGI). La tua app può riusare lo stesso backend OpenAI puntando a `base_url` custom.
+  ```bash
+  # esempio avvio vLLM in locale
+  pip install vllm
+  python -m vllm.entrypoints.openai.api_server \    --model meta-llama/Meta-Llama-3.1-8B-Instruct \    --host 0.0.0.0 --port 8000
+  # poi usa base_url: http://localhost:8000/v1
+  ```
+- **Transformers in‑process (alternativa)**: carica il modello direttamente in app con `transformers` (CPU/GPU locale). Pro: zero servizi esterni. Contro: warm‑up più lento e uso RAM/VRAM elevato.
