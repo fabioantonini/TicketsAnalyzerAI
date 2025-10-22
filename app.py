@@ -45,7 +45,6 @@ NON_SENSITIVE_PREF_KEYS = {
 
 def load_prefs() -> dict:
     try:
-        import json, os
         if os.path.exists(PREFS_PATH):
             with open(PREFS_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -56,7 +55,6 @@ def load_prefs() -> dict:
 
 def save_prefs(prefs: dict):
     try:
-        import json
         clean = {k: v for k, v in prefs.items() if k in NON_SENSITIVE_PREF_KEYS}
         with open(PREFS_PATH, "w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2)
@@ -68,6 +66,16 @@ def init_prefs_in_session():
     if "prefs_loaded" not in st.session_state:
         st.session_state["prefs_loaded"] = True
         st.session_state["prefs"] = load_prefs()
+
+# === Solution Memory (Livello B) ===
+MEM_COLLECTION = "memories"        # collection Chroma separata per i playbook
+DEFAULT_MEM_TTL_DAYS = 180         # scadenza consigliata per le memorie
+
+def now_ts() -> int:
+    return int(time.time())
+
+def ts_in_days(days: int) -> int:
+    return now_ts() + days * 24 * 3600
 
 # ------------------------------
 # Try imports con fallback/shim
@@ -582,15 +590,21 @@ def run_streamlit_app():
                 DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL
             )
 
-        # Default iniziale: prende dalle prefs SOLO al primo giro, poi governa lo stato
+        # Default per provider + prefs (ignorando stringhe vuote)
         llm_model_default = (DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
-        if "llm_model" not in st.session_state:
-            st.session_state["llm_model"] = prefs.get("llm_model", llm_model_default)
+        pref_llm_model = (prefs.get("llm_model") or "").strip()
 
-        # Campo controllato via session_state: così il reset al cambio provider ha effetto
+        if "llm_model" not in st.session_state:
+            st.session_state["llm_model"] = pref_llm_model or llm_model_default
+        else:
+            # Se per qualunque motivo è vuoto, rimetto il default corretto
+            if not (st.session_state["llm_model"] or "").strip():
+                st.session_state["llm_model"] = llm_model_default
+
+        # Campo controllato via session_state
         llm_model = st.text_input("Modello LLM", key="llm_model")
 
-        # Slider temperatura invariato (puoi lasciarlo com’è)
+        # Slider temperatura
         if "llm_temperature" not in st.session_state:
             st.session_state["llm_temperature"] = float(prefs.get("llm_temperature", 0.2))
         llm_temperature = st.slider("Temperature", 0.0, 1.5, st.session_state["llm_temperature"], 0.05)
@@ -634,13 +648,17 @@ def run_streamlit_app():
         with c1:
             if st.button("Salva preferenze"):
                 if prefs_enabled:
+                    _provider_for_save = st.session_state.get("last_llm_provider", llm_provider)
+                    _model_for_save = (st.session_state.get("llm_model") or "").strip()
+                    if not _model_for_save:
+                        _model_for_save = DEFAULT_LLM_MODEL if _provider_for_save == "OpenAI" else DEFAULT_OLLAMA_MODEL
                     save_prefs({
                         "yt_url": yt_url,
                         "persist_dir": persist_dir,
                         "emb_backend": st.session_state.get("last_emb_backend", emb_backend),
                         "emb_model_name": st.session_state.get("emb_model"),
                         "llm_provider": st.session_state.get("last_llm_provider", llm_provider),
-                        "llm_model": st.session_state.get("llm_model"),
+                        "llm_model": _model_for_save,  # <<— usa sempre un valore non vuoto
                         "llm_temperature": st.session_state.get("llm_temperature", llm_temperature),
                         "max_distance": st.session_state.get("max_distance", max_distance),
                         "show_prompt": st.session_state.get("show_prompt", show_prompt),
@@ -662,6 +680,43 @@ def run_streamlit_app():
                 except Exception as e:
                     st.error(f"Errore nel ripristino: {e}")
 
+        st.markdown("---")
+        st.header("Memoria soluzioni (BETA)")
+
+        enable_memory = st.checkbox(
+            "Abilita memory 'playbook' (collection separata)",
+            value=st.session_state.get("enable_memory", False),
+            help="Quando segni una risposta come 'Risolta', salvo un mini-playbook riutilizzabile."
+        )
+        st.session_state["enable_memory"] = enable_memory
+
+        mem_ttl_days = st.number_input(
+            "TTL (giorni) per i playbook",
+            min_value=7, max_value=365,
+            value=st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS), step=1
+        )
+        st.session_state["mem_ttl_days"] = int(mem_ttl_days)
+
+        c_mem1, c_mem2 = st.columns(2)
+        with c_mem1:
+            st.checkbox(
+                "Mostra playbook salvati",
+                key="show_memories",
+                help="Visualizza l’elenco della collection 'memories' nella pagina principale."
+            )
+        with c_mem2:
+            mem_del_confirm = st.checkbox("Conferma cancella memorie", value=False)
+            if st.button("Elimina tutte le memorie", disabled=not mem_del_confirm):
+                try:
+                    _client = chromadb.PersistentClient(
+                        path=persist_dir,
+                        settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
+                    )
+                    _client.delete_collection(name=MEM_COLLECTION)
+                    _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+                    st.success("Memorie eliminate.")
+                except Exception as e:
+                    st.error(f"Errore eliminazione memorie: {e}")
         st.markdown("---")
         quit_btn = st.button("Quit")
         # Apertura automatica della collection selezionata (senza dover re-indicizzare)
@@ -720,7 +775,6 @@ def run_streamlit_app():
                 st.error(f"Connessione fallita: {e}")
 
     # Projects & issues
-    # --- aggiungi questo import assieme agli altri in cima al file ---
 
     st.subheader("Progetti YouTrack")
     if st.session_state.get("yt_client"):
@@ -756,7 +810,6 @@ def run_streamlit_app():
             st.caption("Nessun progetto trovato (o permessi insufficienti).")
 
     # Mostra SEMPRE la tabella se ci sono issue in memoria
-    # --- sostituisci il blocco che mostra la tabella degli issue con questo ---
     issues = st.session_state.get("issues", [])
     if issues:
         base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
@@ -777,6 +830,64 @@ def run_streamlit_app():
         st.markdown("\n".join(lines), unsafe_allow_html=False)
     else:
         st.caption("Nessun issue in memoria. Seleziona un progetto per caricare i ticket.")
+
+    # Main: mostra la tabella solo se attivo
+    if st.session_state.get("show_memories"):
+        st.subheader("Playbook salvati (memories)")
+        try:
+            _client = chromadb.PersistentClient(
+                path=persist_dir,
+                settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
+            )
+            _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+
+            total = _mem.count()
+            st.caption(f"Collection: '{MEM_COLLECTION}' — path: {persist_dir} — count: {total}")
+
+            data = _mem.get(include=["documents", "metadatas"], limit=max(200, total))
+            ids   = data.get("ids") or []
+            docs  = data.get("documents") or []
+            metas = data.get("metadatas") or []
+
+            if total > 0 and not ids:
+                st.warning("La collection riporta count>0 ma get() è vuoto. Riprovo senza include…")
+                data = _mem.get(limit=max(200, total))  # fallback
+                ids   = data.get("ids") or []
+                docs  = data.get("documents") or []
+                metas = data.get("metadatas") or []
+
+            if not ids:
+                st.caption("Nessun playbook salvato.")
+            else:
+                from datetime import datetime
+                import pandas as pd
+
+                rows = []
+                for _id, doc, meta in zip(ids, docs, metas):
+                    meta = meta or {}
+                    created = meta.get("created_at")
+                    expires = meta.get("expires_at")
+
+                    created_s = datetime.fromtimestamp(created).strftime("%Y-%m-%d") if created else ""
+                    expires_s = datetime.fromtimestamp(expires).strftime("%Y-%m-%d") if expires else ""
+
+                    raw_tags = meta.get("tags", "")
+                    tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
+
+                    prev = (doc[:120] + "…") if doc and len(doc) > 120 else (doc or "")
+
+                    rows.append({
+                        "ID": _id,
+                        "Project": meta.get("project", ""),
+                        "Tags": tags,
+                        "Creato": created_s,
+                        "Scade": expires_s,
+                        "Anteprima": prev,
+                    })
+
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        except Exception as e:
+            st.error(f"Errore lettura memorie: {e}")
 
     # Ingest
     st.subheader("Indicizzazione Vector DB")
@@ -859,22 +970,57 @@ def run_streamlit_app():
 
                 # Retrieval
                 q_emb = st.session_state["embedder"].embed([query])
-                res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=top_k)
-                docs  = res.get("documents", [[]])[0]
-                metas = res.get("metadatas", [[]])[0]
-                dists = res.get("distances", [[]])[0]
 
-                # Filtra risultati per distanza
-                DIST_MAX = max_distance
-                retrieved = [
-                    (doc, meta, dist)
-                    for doc, meta, dist in zip(docs, metas, dists)
-                    if dist is not None and dist <= DIST_MAX
+                # 1) KB
+                kb_res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=top_k)
+                kb_docs  = kb_res.get("documents", [[]])[0]
+                kb_metas = kb_res.get("metadatas", [[]])[0]
+                kb_dists = kb_res.get("distances", [[]])[0]
+
+                DIST_MAX_KB = max_distance
+                kb_retrieved = [
+                    (doc, meta, dist, "KB")
+                    for doc, meta, dist in zip(kb_docs, kb_metas, kb_dists)
+                    if dist is not None and dist <= DIST_MAX_KB
                 ]
 
-                # Prompt
-                if retrieved:
-                    prompt = build_prompt(query, retrieved)
+                # 2) MEMORIES (se abilitato)
+                mem_retrieved = []
+                if st.session_state.get("enable_memory", False):
+                    try:
+                        _client = chromadb.PersistentClient(
+                            path=persist_dir,
+                            settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
+                        )
+                        _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+                        mem_res = _mem.query(query_embeddings=q_emb, n_results=min(5, top_k))
+                        mem_docs  = mem_res.get("documents", [[]])[0]
+                        mem_metas = mem_res.get("metadatas", [[]])[0]
+                        mem_dists = mem_res.get("distances", [[]])[0]
+
+                        DIST_MAX_MEM = max(0.0, DIST_MAX_KB - 0.05)  # leggermente più stretta
+                        now = now_ts()
+                        for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
+                            if dist is None:
+                                continue
+                            meta = meta or {}
+                            exp = int(meta.get("expires_at", 0))
+                            if exp and exp < now:
+                                continue
+                            if dist <= DIST_MAX_MEM:
+                                mem_retrieved.append((doc, meta, dist, "MEM"))
+                    except Exception:
+                        pass  # la memoria è opzionale
+
+                # 3) Fusione: max 2 mem, poi KB fino a top_k
+                mem_cap = 2
+                merged = sorted(mem_retrieved, key=lambda x: x[2])[:mem_cap] + \
+                        sorted(kb_retrieved, key=lambda x: x[2])[:max(0, top_k - min(mem_cap, len(mem_retrieved)))]
+
+                # 4) Prompt
+                if merged:
+                    retrieved_for_prompt = [(doc, meta, dist) for (doc, meta, dist, _src) in merged]
+                    prompt = build_prompt(query, retrieved_for_prompt)
                 else:
                     prompt = f"Nuovo ticket:\n{query.strip()}\n\nNessun ticket simile è stato trovato nel knowledge base."
 
@@ -883,35 +1029,107 @@ def run_streamlit_app():
                         st.code(prompt, language="markdown")
 
                 # LLM
-                llm = LLMBackend(llm_provider, llm_model, temperature=llm_temperature)
+                _model = (llm_model or "").strip()
+                if not _model:
+                    raise RuntimeError("Modello LLM non impostato: seleziona un modello valido nella sidebar.")
+
+                llm = LLMBackend(llm_provider, _model, temperature=llm_temperature)
                 with st.spinner("Genero risposta..."):
                     answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
                 st.write(answer)
+                # conserva l'ultimo Q/A per il salvataggio fuori da if run_chat
+                st.session_state["last_query"] = query
+                st.session_state["last_answer"] = answer
 
-                # Mostra risultati simili una sola volta (cliccabili) SOLO se esistono match sotto soglia
-                if retrieved:
+                # 5) Risultati simili con provenienza
+                if merged:
                     base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
-                    st.write("Risultati simili (top-k):")
-                    for (doc, meta, dist) in retrieved:
-                        idr = meta.get("id_readable", "")
-                        summary = meta.get("summary", "")
-                        url = f"{base_url}/issue/{idr}" if base_url and idr else ""
-                        if url:
-                            if show_distances:
-                                st.markdown(f"- [{idr}]({url}) — distanza={dist:.3f} — {summary}")
+                    st.write("Risultati simili (top-k, con provenienza):")
+                    for (doc, meta, dist, src) in merged:
+                        if src == "KB":
+                            idr = meta.get("id_readable", "")
+                            summary = meta.get("summary", "")
+                            url = f"{base_url}/issue/{idr}" if base_url and idr else ""
+                            label = f"[KB] {idr}" if idr else "[KB]"
+                            if url:
+                                if show_distances: st.markdown(f"- [{label}]({url}) — distanza={dist:.3f} — {summary}")
+                                else:              st.markdown(f"- [{label}]({url}) — {summary}")
                             else:
-                                st.markdown(f"- [{idr}]({url}) — {summary}")
+                                if show_distances: st.write(f"- {label} — distanza={dist:.3f} — {summary}")
+                                else:              st.write(f"- {label} — {summary}")
                         else:
-                            if show_distances:
-                                st.write(f"- {idr} — distanza={dist:.3f} — {summary}")
-                            else:
-                                st.write(f"- {idr} — {summary}")
+                            preview = (doc[:120] + "…") if len(doc) > 120 else doc
+                            proj = meta.get("project", "")
+                            raw_tags = meta.get("tags", "")
+                            tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
+                            extra = f" (tags: {tags})" if tags else (f" (proj: {proj})" if proj else "")
+                            if show_distances: st.markdown(f"- [MEM]{extra} — distanza={dist:.3f} — {preview}")
+                            else:              st.markdown(f"- [MEM]{extra} — {preview}")
                 else:
                     st.caption("Nessun risultato sufficientemente simile (sotto soglia).")
 
             except Exception as e:
                 st.error(f"Errore chat: {e}")
+    # --- Bottone persistente per salvare il playbook (fuori da if run_chat) ---
+    if st.session_state.get("enable_memory", False) and st.session_state.get("last_answer"):
+        st.markdown("---")
+        if st.button("✅ Segna come risolto → Salva come playbook"):
+            try:
+                query  = st.session_state.get("last_query", "") or ""
+                answer = st.session_state.get("last_answer", "") or ""
+                condense_prompt = (
+                    "Riassumi la soluzione in 3–6 frasi, imperative e riutilizzabili, evitando dati sensibili.\n"
+                    f"- Query: {query.strip()}\n- Risposta:\n{answer}\n\n"
+                    "Output: elenco puntato di passi chiari."
+                )
+                # usa il modello già validato in chat
+                _model = (st.session_state.get("llm_model") or "").strip()
+                if not _model:
+                    _model = DEFAULT_LLM_MODEL if st.session_state.get("last_llm_provider","OpenAI") == "OpenAI" else DEFAULT_OLLAMA_MODEL
 
+                try:
+                    llm_mem = LLMBackend(llm_provider, _model, temperature=max(0.1, llm_temperature - 0.1))
+                    playbook_text = llm_mem.generate(
+                        "Sei un assistente che distilla mini-playbook riutilizzabili.",
+                        condense_prompt
+                    ).strip()
+                except Exception:
+                    playbook_text = (answer[:800] + "…") if len(answer) > 800 else answer
+
+                if not playbook_text.strip():
+                    st.warning("Nessun contenuto da salvare.")
+                else:
+                    curr_proj = st.session_state.get("last_project_key") or ""
+                    tags_list = ["playbook"] + ([curr_proj] if curr_proj else [])
+
+                    meta = {
+                        "source": "memory",
+                        "project": curr_proj,
+                        "quality": "verified",
+                        "created_at": now_ts(),
+                        "expires_at": ts_in_days(st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)),
+                        "tags": ",".join(tags_list),  # <-- CSV invece di lista
+                    }
+
+                    if st.session_state.get("embedder") is None:
+                        use_openai_embeddings = (emb_backend == "OpenAI")
+                        st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
+                    mem_emb = st.session_state["embedder"].embed([playbook_text])[0]
+
+                    _client = chromadb.PersistentClient(
+                        path=persist_dir,
+                        settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
+                    )
+                    _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+                    mem_id = f"mem::{uuid.uuid4().hex[:12]}"
+                    _mem.add(ids=[mem_id], documents=[playbook_text], metadatas=[meta], embeddings=[mem_emb])
+
+                    st.caption(f"Salvato playbook in path='{persist_dir}', collection='{MEM_COLLECTION}'")
+                    st.success("Playbook salvato nella memoria.")
+                    st.session_state["show_memories"] = True   # apri subito la vista
+                    st.rerun()                                  # refresh tabella
+            except Exception as e:
+                st.error(f"Errore salvataggio playbook: {e}")
 
 # ------------------------------
 # CLI + Self-tests (opzionali)
