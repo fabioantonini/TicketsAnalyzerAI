@@ -356,8 +356,9 @@ def run_streamlit_app():
 
         st.markdown("---")
         st.header("Vector DB")
-        persist_dir = st.text_input("Chroma path", value=DEFAULT_CHROMA_DIR)
-        # Legge le collections esistenti e permette di crearne una nuova
+        persist_dir = st.text_input("Chroma path", value=DEFAULT_CHROMA_DIR, key="persist_dir")
+
+        # Leggi le collections esistenti
         coll_options = []
         try:
             if chromadb is not None:
@@ -370,19 +371,42 @@ def run_streamlit_app():
             st.caption(f"Impossibile leggere le collections da '{persist_dir}': {e}")
 
         NEW_LABEL = "➕ Crea nuova collection..."
+        # Mantieni in sessione l'ultima scelta/nome nuova collection
+        last_sel = st.session_state.get("collection_selected")
+        last_new = st.session_state.get("new_collection_name", DEFAULT_COLLECTION)
+
         if coll_options:
             opts = coll_options + [NEW_LABEL]
-            default_index = opts.index(DEFAULT_COLLECTION) if DEFAULT_COLLECTION in opts else 0
-            sel = st.selectbox("Collection", options=opts, index=default_index)
-            collection_name = st.text_input("Nome nuova Collection", value=DEFAULT_COLLECTION) if sel == NEW_LABEL else sel
+
+            # Se esiste un'ultima selezione valida, usala; altrimenti predefinisci 0
+            if last_sel in opts:
+                default_index = opts.index(last_sel)
+            elif DEFAULT_COLLECTION in opts:
+                default_index = opts.index(DEFAULT_COLLECTION)
+            else:
+                default_index = 0
+
+            sel = st.selectbox("Collection", options=opts, index=default_index, key="collection_select")
+
+            if sel == NEW_LABEL:
+                new_name = st.text_input("Nome nuova Collection", value=last_new, key="new_collection_name")
+                collection_name = new_name.strip() or DEFAULT_COLLECTION
+                # Registra che stiamo creando una nuova collection
+                st.session_state["collection_selected"] = NEW_LABEL
+            else:
+                collection_name = sel
+                st.session_state["collection_selected"] = sel
+                st.session_state["new_collection_name"] = DEFAULT_COLLECTION  # reset opzionale
         else:
             st.caption("Nessuna collection trovata. Creane una nuova:")
-            collection_name = st.text_input("Nuova Collection", value=DEFAULT_COLLECTION)
+            new_name = st.text_input("Nuova Collection", value=last_new, key="new_collection_name")
+            collection_name = new_name.strip() or DEFAULT_COLLECTION
+            st.session_state["collection_selected"] = NEW_LABEL
 
-        # Pulsante per eliminare la collection selezionata
+        # --- Gestione collection: elimina ---
         st.markdown("—")
         st.subheader("Gestione collection")
-        is_existing_collection = "coll_options" in locals() and (collection_name in coll_options)
+        is_existing_collection = collection_name in coll_options
 
         del_confirm = st.checkbox(
             f"Conferma eliminazione di '{collection_name}'",
@@ -407,14 +431,17 @@ def run_streamlit_app():
                     )
                     _client.delete_collection(name=collection_name)
 
-                    # Pulisci lo stato della sessione se puntava alla collection appena rimossa
+                    # Pulisci stato se puntava alla collection rimossa
                     if st.session_state.get("vs_collection") == collection_name:
                         st.session_state["vector"] = None
                         st.session_state["vs_collection"] = None
                         st.session_state["vs_count"] = 0
 
+                    # Rimuovi selezione e nome nuova dalla sessione
+                    st.session_state["collection_selected"] = None
+                    st.session_state["new_collection_name"] = DEFAULT_COLLECTION
                     st.success(f"Collection '{collection_name}' eliminata con successo.")
-                    st.rerun()  # ricarica l'app per aggiornare la dropbox
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Errore durante l'eliminazione: {e}")
 
@@ -463,6 +490,7 @@ def run_streamlit_app():
         st.markdown("---")
         quit_btn = st.button("Quit")
         # Apertura automatica della collection selezionata (senza dover re-indicizzare)
+        # Evita l'apertura se l'utente ha scelto "Crea nuova…" ma non ha digitato un nome diverso da default
         vector_ready = False
         if persist_dir and collection_name:
             changed = (
@@ -470,17 +498,22 @@ def run_streamlit_app():
                 or st.session_state.get("vs_collection") != collection_name
                 or st.session_state.get("vector") is None
             )
-            if changed:
-                ok, cnt, err = open_vector_in_session(persist_dir, collection_name)
-                vector_ready = ok
-                if ok:
-                    st.caption(f"Collection '{collection_name}' aperta. Documenti indicizzati: {cnt if cnt>=0 else 'N/A'}")
-                else:
-                    st.caption(f"Non riesco ad aprire la collection: {err}")
+
+            # Non aprire se siamo su NEW_LABEL e il nome è vuoto (o solo default) e non esiste ancora
+            if st.session_state.get("collection_selected") == NEW_LABEL and (collection_name == "" or (collection_name == DEFAULT_COLLECTION and collection_name not in coll_options)):
+                pass  # aspetta che l'utente clicchi "Indicizza" per creare la nuova collection
             else:
-                vector_ready = True
-                cnt = st.session_state.get("vs_count", -1)
-                st.caption(f"Collection '{collection_name}' pronta. Documenti indicizzati: {cnt if cnt>=0 else 'N/A'}")
+                if changed:
+                    ok, cnt, err = open_vector_in_session(persist_dir, collection_name)
+                    vector_ready = ok
+                    if ok:
+                        st.caption(f"Collection '{collection_name}' aperta. Documenti indicizzati: {cnt if cnt>=0 else 'N/A'}")
+                    else:
+                        st.caption(f"Non riesco ad aprire la collection: {err}")
+                else:
+                    vector_ready = True
+                    cnt = st.session_state.get("vs_count", -1)
+                    st.caption(f"Collection '{collection_name}' pronta. Documenti indicizzati: {cnt if cnt>=0 else 'N/A'}")
 
         if quit_btn:
             st.write("Chiusura applicazione...")
