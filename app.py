@@ -460,7 +460,7 @@ def run_streamlit_app():
         st.header("Retrieval")
         max_distance = st.slider(
             "Soglia massima distanza (cosine)",
-            min_value=0.1, max_value=2.0, value=0.9, step=0.05,
+            min_value=0.1, max_value=2.0, value=1.0, step=0.05,
             help="Più bassa = risultati più simili. Con Chroma/cosine, 0 è identico, valori alti sono meno simili."
         )
 
@@ -491,7 +491,7 @@ def run_streamlit_app():
 
         st.markdown("---")
         st.header("Chat settings")
-        top_k = st.slider("Numero risultati (k)", min_value=1, max_value=20, value=5, step=1)
+        top_k = st.slider("Numero risultati (k)", min_value=1, max_value=20, value=3, step=1)
         show_distances = st.checkbox("Mostra distanza nei risultati", value=True)
 
         st.markdown("---")
@@ -669,7 +669,10 @@ def run_streamlit_app():
             try:
                 if st.session_state.get("embedder") is None:
                     use_openai_embeddings = (emb_backend == "OpenAI")
-                    st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
+                    st.session_state["embedder"] = EmbeddingBackend(
+                        use_openai=use_openai_embeddings,
+                        model_name=emb_model_name
+                    )
 
                 # Avvisa se il modello corrente differisce da quello usato per l'indicizzazione
                 try:
@@ -677,19 +680,24 @@ def run_streamlit_app():
                     if os.path.exists(meta_path):
                         with open(meta_path, "r", encoding="utf-8") as f:
                             m = json.load(f)
-                        if (m.get("provider") != st.session_state["embedder"].provider_name) or (m.get("model") != st.session_state["embedder"].model_name):
-                            st.info(f"Nota: la collection è stata indicizzata con {m.get('provider')} / {m.get('model')}; stai cercando con {st.session_state['embedder'].provider_name} / {st.session_state['embedder'].model_name}.")
+                        if (m.get("provider") != st.session_state["embedder"].provider_name) or \
+                        (m.get("model") != st.session_state["embedder"].model_name):
+                            st.info(
+                                f"Nota: la collection è stata indicizzata con {m.get('provider')} / {m.get('model')}; "
+                                f"stai cercando con {st.session_state['embedder'].provider_name} / "
+                                f"{st.session_state['embedder'].model_name}."
+                            )
                 except Exception:
                     pass
 
+                # Retrieval
                 q_emb = st.session_state["embedder"].embed([query])
-                res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=5)
+                res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=top_k)
                 docs  = res.get("documents", [[]])[0]
                 metas = res.get("metadatas", [[]])[0]
                 dists = res.get("distances", [[]])[0]
 
-                # Filtra per distanza: tieni solo i risultati davvero simili
-                # Usa lo slider 'max_distance' se l'hai aggiunto; in alternativa imposta un default, es: 0.9
+                # Filtra risultati per distanza
                 DIST_MAX = max_distance if "max_distance" in locals() else 0.9
                 retrieved = [
                     (doc, meta, dist)
@@ -697,50 +705,39 @@ def run_streamlit_app():
                     if dist is not None and dist <= DIST_MAX
                 ]
 
-                # Costruisci il prompt in base a ciò che è passato il filtro
+                # Prompt
                 if retrieved:
                     prompt = build_prompt(query, retrieved)
                 else:
-                    # Nessun match utile: costruisci un prompt “vuoto” per far rispondere al LLM senza suggerire falsi riferimenti
                     prompt = f"Nuovo ticket:\n{query.strip()}\n\nNessun ticket simile è stato trovato nel knowledge base."
-                    
+
+                # LLM
                 llm = LLMBackend(llm_provider, llm_model, temperature=llm_temperature)
                 with st.spinner("Genero risposta..."):
                     answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
                 st.write(answer)
 
-                # Mostra la lista simili SOLO se abbiamo almeno un risultato sotto soglia
+                # Mostra risultati simili una sola volta (cliccabili) SOLO se esistono match sotto soglia
                 if retrieved:
+                    base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
                     st.write("Risultati simili (top-k):")
                     for (doc, meta, dist) in retrieved:
                         idr = meta.get("id_readable", "")
                         summary = meta.get("summary", "")
-                        st.write(f"- {idr} — distanza={dist:.3f} — {summary}")
+                        url = f"{base_url}/issue/{idr}" if base_url and idr else ""
+                        if url:
+                            if show_distances:
+                                st.markdown(f"- [{idr}]({url}) — distanza={dist:.3f} — {summary}")
+                            else:
+                                st.markdown(f"- [{idr}]({url}) — {summary}")
+                        else:
+                            if show_distances:
+                                st.write(f"- {idr} — distanza={dist:.3f} — {summary}")
+                            else:
+                                st.write(f"- {idr} — {summary}")
                 else:
                     st.caption("Nessun risultato sufficientemente simile (sotto soglia).")
-                prompt = build_prompt(query, retrieved)
-                llm = LLMBackend(llm_provider, llm_model, temperature=llm_temperature)
-                with st.spinner("Genero risposta..."):
-                    answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
-                st.write(answer)
 
-                # risultati simili (cliccabili)
-                base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
-                st.write("Risultati simili (top-k):")
-                for (doc, meta, dist) in retrieved:
-                    idr = meta.get("id_readable", "")
-                    summary = meta.get("summary", "")
-                    url = f"{base_url}/issue/{idr}" if base_url and idr else ""
-                    if url:
-                        if show_distances:
-                            st.markdown(f"- [{idr}]({url}) — distanza={dist:.3f} — {summary}")
-                        else:
-                            st.markdown(f"- [{idr}]({url}) — {summary}")
-                    else:
-                        if show_distances:
-                            st.write(f"- {idr} — distanza={dist:.3f} — {summary}")
-                        else:
-                            st.write(f"- {idr} — {summary}")
             except Exception as e:
                 st.error(f"Errore chat: {e}")
 
