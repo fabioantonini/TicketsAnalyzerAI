@@ -163,3 +163,102 @@ Note puntuali sul codice attuale
 * L’UI è già wide e la tabella usa un width parametrico; bene per evitare la “finestra stretta”.&#x20;
 * L’ingest indicizza summary e description (tramite text\_blob), quindi non solo i titoli.&#x20;
 * LLMBackend: ottimo il fallback Responses → chat.completions; rendi solo più robusta l’estrazione del testo e centralizza la gestione della chiave.&#x20;
+
+# **Roadmap Memoria**
+
+# Livello A — Sticky prefs (✅ fatto)
+
+* Preferenze non sensibili su `.app_prefs.json`, reset automatico dei modelli al cambio provider, validazioni.
+  *(nulla da fare qui, se non eventuali piccoli tweak UX).*
+
+# Livello B — “Solution memory” (playbook) (🟡 quasi completo)
+
+**Già fatto**
+
+* Collection separata `memories` (Chroma) con TTL.
+* Salvataggio playbook (“Segna come risolto”) con condensazione 3–6 frasi.
+* Retrieval combinato KB⊕MEM (stessa soglia), provenienza [MEM], anteprima/expander.
+* Vista “Playbook salvati” (tabella), delete-all, sticky toggle per mostrare/nascondere.
+
+**Mancanti/consigliati**
+
+1. **Qualità e tagging avanzato**
+
+   * Campo `quality` gestito da UI: `verified|draft` (ora hardcoded).
+   * Tagging manuale in salvataggio (textbox “Tag aggiuntivi” → salva CSV).
+   * Filtro per `project`/`tags` in retrieval MEM (es. limita a progetto corrente se presente).
+
+2. **Gestione per-singolo playbook**
+
+   * **Cancella singolo**: pulsante cestino accanto a ogni riga nella tabella.
+   * **Modifica testo**: expander con `st.text_area` e bottone “Aggiorna” (ri-salva documento e, opzionalmente, re-embed).
+
+3. **Compatibilità embedder**
+
+   * Aggiungi ai metadati: `mem_embed_provider`, `mem_embed_model`.
+   * Avviso in query se embedder MEM ≠ embedder corrente (“le distanze potrebbero degradare”).
+   * **Re-embed on-demand**: bottone “Ricalcola embedding” per playbook selezionato quando cambi modello.
+
+4. **UX/Performance elenco**
+
+   * **Paginazione** (batch da 200 → “Carica altri”).
+   * **Ricerca full-text** locale (filter client-side su `doc`/`tags`/`project`).
+   * **Export** playbook (CSV/Markdown) dalla tabella.
+
+5. **Merging e ranking**
+
+   * MMR leggero sul merged KB⊕MEM (evita ridondanze): diversità sulla base di cosine.
+   * **Cap configurabile** per MEM (0–3) + soglia dedicata opzionale (oggi uguale a KB).
+
+6. **Conferma salvataggio & policy**
+
+   * Dialog opzionale “Confermi di memorizzare?” con reminder NO-PII.
+   * Template di condensazione più “procedurale” (step numerati, prerequisiti, verifiche).
+
+7. **Metriche (debug facoltativo)**
+
+   * Caption con distanze MEM, tempo embedding, tempo query.
+   * Contatore utilizzo playbook (incrementa `uses` nel metadata quando selezionato nel merged).
+
+# Livello C — “Facts strutturati” (🔜 da implementare)
+
+**Obiettivo**: memorizzare **coppie chiave–valore** affidabili (facts) separate dai playbook e inserirle nel prompt come **contesto strutturato**.
+
+**Design proposto**
+
+* **Storage**: piccolo SQLite (`facts.db`) con tabella:
+
+  * `facts(user TEXT, project TEXT, key TEXT, value TEXT, source_ticket TEXT, created_at INT, expires_at INT, confidence REAL DEFAULT 1.0, UNIQUE(user, project, key))`.
+* **UI**
+
+  * In chat: pillola “➕ Aggiungi fatto” → modale con (project, key, value, TTL).
+  * Lista “Fatti attivi per il progetto X” con pulsanti **Modifica** / **Dimentica** (delete) / **Estendi TTL**.
+* **Prompting**
+
+  * Prima della generazione, serializza i facts rilevanti in 2–4 righe concise (es. `project=NETKB; gateway_vendor=Acme; vlan_voice=120; ...`).
+  * Se presenti facts, **indicali** al modello come constraints (“non contraddire i facts”).
+* **Scadenze & guardrail**
+
+  * TTL automatico; filtro su `expires_at`.
+  * No PII/secret; avviso se `key` o `value` sembrano credenziali (regex banali).
+* **Ricerca**
+
+  * Usa facts per **boost** nel retrieval (es. se `product=XYZ` → favorisci documenti con `tags` corrispondenti).
+* **Operazioni**
+
+  * `upsert` per key per-progetto.
+  * “Dimentica questo fatto” in un click.
+
+# Piano pragmatico (2 mini-sprint)
+
+**Sprint 1 (Livello B rifiniture)**
+
+* Per-playbook: elimina/modifica/ri-embed; tag “quality” in UI; ricerca/paginazione; export CSV.
+* Metadati embedder + avviso mismatch.
+* Cap MEM configurabile + MMR basico.
+
+**Sprint 2 (Livello C MVP)**
+
+* SQLite + CRUD facts; UI “Aggiungi fatto”/“Dimentica”.
+* Serializzazione facts nel prompt; TTL/scadenze; validazioni basiche.
+* (Opzionale) boost nel retrieval basato su facts.
