@@ -439,8 +439,18 @@ def run_streamlit_app():
 
         NEW_LABEL = "➕ Crea nuova collection..."
         # Mantieni in sessione l'ultima scelta/nome nuova collection
+        prefs = st.session_state.get("prefs", {})
+
+        # Fallback: prima sessione → poi prefs → None
         last_sel = st.session_state.get("collection_selected")
-        last_new = st.session_state.get("new_collection_name", DEFAULT_COLLECTION)
+        if not last_sel:
+            last_sel = (prefs.get("collection_selected") or "").strip() or None
+
+        last_new = st.session_state.get("new_collection_name")
+        if not last_new:
+            last_new = (prefs.get("new_collection_name") or DEFAULT_COLLECTION)
+
+        st.caption(f"Pref selezionata: {prefs.get('collection_selected', '—')}  ·  Path: {persist_dir}")
 
         if coll_options:
             opts = coll_options + [NEW_LABEL]
