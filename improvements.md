@@ -329,3 +329,156 @@ Posso fornirti subito:
 
 In sintesi: **sì, aggiungi i PDF**, ma **tenendoli separati** e con **cap/filtri**. Così ottieni più copertura informativa senza degradare la precisione delle risposte.
 
+# **Metriche di valutazione**
+Ti propongo un **piano pratico** (e realizzabile in pochi giorni) per valutare end-to-end il tuo RAG su ticket YouTrack, coprendo **retrieval**, **generazione**, **groundedness/assenza di allucinazioni**, **performance**, e **memoria (playbook)**.
+
+---
+
+# 1) Dataset di valutazione (gold set)
+
+1. **Raccolta** (50–200 casi):
+
+   * prendi storici reali: per ciascun ticket *Q* (descrizione/problema), definisci:
+
+     * **answer_gold**: la soluzione breve/riusabile (puoi usare il tuo playbook o il “resolution” del ticket).
+     * **doc_gold**: l’insieme di ticket *rilevanti* (ID) che dovrebbero comparire nel retrieval.
+   * includi sia casi facili che “rumorosi” (più lunghi, duplicati, simili).
+2. **Normalizzazione**:
+
+   * pulisci i testi (lowercase, remove boilerplate) **solo ai fini di matching**.
+3. **Split**:
+
+   * 80% *dev*, 20% *hold-out* (mai toccare l’hold-out fino a fine tuning).
+
+> Se usi i **playbook**, aggiungi per ~30% dei casi anche `mem_gold` (playbook desiderati).
+
+---
+
+# 2) Valutazione Retrieval (senza LLM)
+
+Per ogni query del gold set:
+
+* esegui la tua pipeline di **embedding + nearest neighbors** su `tickets` (e, se attivo, `memories`).
+* calcola:
+
+**Metriche KB**
+
+* **Recall@k** = |doc_gold ∩ top-k| / |doc_gold| (target ≥ 0.8 con k=5).
+* **Hit@k** = 1 se (doc_gold ∩ top-k) ≠ ∅, altrimenti 0 (target ≥ 0.9 con k=10).
+* **MRR@k** (reciprocal rank del primo rilevante).
+* **nDCG@k** se hai rilevanza graduata (es. “molto simile”, “correlato”).
+
+**Metriche MEM (se attivo)**
+
+* **Hit@k(mem)**: almeno un playbook utile tra i primi k (tipicamente k_mem ≤ 2).
+* **Coverage MEM**: % query per cui almeno un playbook è rilevante.
+
+**Analisi soglie**
+
+* curva **Recall@k** al variare della **distanza massima** (il tuo slider) e del **top-k** → scegli un **punto di lavoro** (es. soglia 0.9, k=5) che massimizza Recall con rumore accettabile.
+
+**A/B tecnici**
+
+* confronta embedder (MiniLM vs OpenAI) e parametri (k, soglia) sullo stesso gold.
+
+---
+
+# 3) Valutazione Generazione (con LLM)
+
+Per ciascuna query *Q* e i documenti recuperati *C*:
+
+**3.1 Metriche automatiche “lite”**
+
+* **EM/F1**: utile se answer_gold è breve/strutturata (es. “disabilita SIP ALG”).
+* **ROUGE-L**: per risposte discorsive, come proxy di copertura.
+
+**3.2 Groundedness & Faithfulness (evita allucinazioni)**
+
+* **Supporto dalle fonti**: percentuale di frasi dell’output che hanno *evidenza* in C (match lessicale o *NLI entailment* se vuoi raffinare).
+* **No-contradiction**: usa un semplice check NLI (se disponibile) o regex per negazioni incongrue rispetto a C.
+* **Attribution rate**: quante affermazioni citano/si riferiscono a ticket/playbook mostrati.
+
+**Target ragionevoli**
+
+* EM/F1 medio ≥ 0.6 sui casi “short answer”; ROUGE-L ≥ 0.35 sui casi lunghi.
+* Groundedness ≥ 0.85; Contradiction ≈ 0%.
+
+**3.3 Valutazione umana (rapida, affidabile)**
+
+* Griglia da 1 a 5 per: **Correttezza**, **Completezza**, **Chiarezza**, **Azione** (quanto è “applicabile”).
+* **Flag** “serve escalation” (se la risposta è vaga/insicura).
+* 2 valutatori su 30–50 casi dell’hold-out → calcola media e accordo (percentuale di scostamento ≤ 1 punto).
+
+---
+
+# 4) Valutazione del merge KB ⊕ MEM
+
+* Confronta **3 varianti** su dev set:
+
+  1. **Solo KB**
+  2. **KB ⊕ MEM (cap 1)**
+  3. **KB ⊕ MEM (cap 2)** + (opzionale) MMR leggero
+* Misura: **F1/ROUGE**, **Groundedness**, **tempo medio**.
+  Accetta la variante che migliora la qualità **senza** degradare troppo la latenza (+10–20% max).
+
+---
+
+# 5) Robustezza & regressioni
+
+* **Test avversari**: query vaghe (“non va internet”), query fuori dominio, query con typo → attesi “no match” puliti e consigli successivi coerenti.
+* **Stabilità**: ripeti 3 volte le stesse query (stessa temperatura) e verifica la **varianza** dell’output.
+* **Regressioni**: tieni uno **script di benchmark** che macina il gold set e genera un report CSV/HTML con le metriche sopra: lo esegui a ogni modifica (embedder, soglia, cap MEM, ecc.).
+
+---
+
+# 6) Telemetria operativa (prod-like)
+
+* **Logging**: salva per ogni query reale (opt-in): query, k, soglia, id dei doc usati, distanza, latenza end-to-end, provider LLM/embeddings, flag “utente soddisfatto?” (thumbs up/down).
+* **Dashboard** (anche semplice con Streamlit): hit@k giornaliera, groundedness stimata (proxy: % risposte con almeno 1 doc sotto soglia), tempi medi, errori.
+
+---
+
+# 7) Criteri di accettazione (PoC → Go/NoGo)
+
+* Retrieval: **Recall@5 ≥ 0.80**, **MRR@10 ≥ 0.6**.
+* Generazione: **Groundedness ≥ 0.85**, **Contradiction ≈ 0%**, **Human score medio ≥ 4/5** su correttezza/azione.
+* Operatività: **p95 latenza ≤ 4–6 s** (dipende da LLM) e **error rate < 1%**.
+* Memoria: **Coverage MEM ≥ 30%** sulle query recidive; nessun caso di memorie “contraddittorie”.
+
+---
+
+## Mini-howto (subito applicabile nel tuo progetto)
+
+* **Gold set YAML/JSON**:
+
+  ```json
+  {
+    "query_id": "Q123",
+    "query": "VoIP audio monodirezionale con SBC esterno",
+    "answer_gold": "Disabilita SIP ALG e apri range RTP.",
+    "doc_gold": ["NETKB-3"],
+    "mem_gold": []
+  }
+  ```
+* **Script eval (offline)**:
+
+  1. per ogni voce: embed → retrieve → calcola Recall/Hit/MRR/nDCG,
+  2. costruisci il prompt → LLM → EM/F1/ROUGE,
+  3. groundedness: confronta frasi con il contesto (overlap o NLI),
+  4. salva CSV con tutte le metriche per riga + medie nel footer.
+* **A/B**: aggiungi flag CLI per embedder, soglia, top-k, cap MEM.
+
+---
+
+## Consigli tattici per migliorare i numeri
+
+* **Chunking** ticket (se lunghi): 200–400 token + overlap 50 → migliori recall.
+* **Rerank leggero** sui top-k (cosine + BM25 o MMR) → migliori MRR/nDCG.
+* **Prompt di risposta con struttura** (steps, prerequisiti, verifica) → migliori i giudizi umani su azionabilità.
+* **Soglie diverse per sorgente** (se reintroduci PDF): DOC leggermente più stretta.
+
+---
+
+Se vuoi, ti preparo uno **scheletro di script** (Python) che legge il tuo `persist_dir`, esegue il benchmark sul gold set e sputi un **report CSV + HTML** con tutte le metriche.
+
+
