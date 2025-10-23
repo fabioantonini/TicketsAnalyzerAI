@@ -482,3 +482,133 @@ Per ciascuna query *Q* e i documenti recuperati *C*:
 Se vuoi, ti preparo uno **scheletro di script** (Python) che legge il tuo `persist_dir`, esegue il benchmark sul gold set e sputi un **report CSV + HTML** con tutte le metriche.
 
 
+# **Evoluzione UI**
+Ti rispondo in due parti: (A) Streamlit per un prodotto “pro” sì/no, (B) come rendere **l’UI attuale** più efficace rimanendo su Streamlit.
+
+---
+
+# A) Streamlit è “professionale” per un prodotto commerciale?
+
+**Pro**
+
+* Sviluppo rapidissimo in Python (niente build FE).
+* Ottimo per **PoC** e **internal tools** (ops, data apps, demo cliente).
+* Deployment semplice (Docker + `streamlit run`), condivisibile on-prem.
+* Componenti già pronti (file uploader, sidebar, charts) + community components.
+
+**Contro (quando diventa “prodotto”)**
+
+* **Multi-utenza**, sessioni e **autenticazione/RBAC**: si può fare, ma non è nativo come in un framework web (serve integrazione custom o SSO reverse-proxy).
+* **UX avanzata**: layout complessi, routing, URL state, modali/pagine multiple → fattibili ma più macchinosi.
+* **Performance UI/latency**: ogni interazione trigghera un “rerun”; va gestito con `st.form`, `st.cache_data`, `st.session_state`.
+* **Branding** limitato: theming ok, ma meno libertà rispetto a un FE React/Next.
+
+**Raccomandazione pragmatica**
+
+* **Se target = team interni / pilot con clienti** → Streamlit va benissimo (con un minimo di hardening).
+* **Se target = prodotto SaaS/enterprise** (multi-tenant, SSO, ruoli, audit log, licensing, uso massivo) → meglio spostare la UI su uno stack web classico:
+
+  * **Frontend**: React/Next.js + design system (shadcn/ui, MUI).
+  * **Backend**: FastAPI (Python) per le API (YouTrack proxy, RAG orchestration).
+  * **Worker**: Celery/Arq per job ingestion e indicizzazione.
+  * **Auth**: Keycloak/Auth0/SSO aziendale (OIDC/SAML).
+  * **RAG**: Chroma/pgvector dietro API; logging/telemetria strutturata.
+
+---
+
+# B) Migliorare l’UI attuale su Streamlit (senza cambiare framework)
+
+Di seguito una checklist **molto concreta** per passare da PoC a “polished internal app”.
+
+## Layout & Navigazione
+
+* **Tabs** nella main page:
+  `st.tabs(["📥 Ingestion", "🔎 Ricerca", "🧠 Playbook", "⚙️ Config"])`
+  Eviti che la pagina diventi troppo lunga, separi chiaramente i flussi.
+* **Forms per azioni “batch”**: racchiudi input + bottone in `st.form` → un solo rerun alla submit e niente sfarfallii.
+* **Pannelli collassabili** (`st.expander`) per opzioni avanzate: es. “Debug”, “Parametri embedding”, “Soglie”.
+* **Sticky status bar** in alto (con `st.columns`): mostra ambiente, provider LLM, collection attiva, conteggi (tickets/memories), indicatori “connected/disconnected”.
+
+## Gerarchia visiva
+
+* Usa **icone** nelle label (lo stai già facendo): 📦 collection, 🧠 playbook, 🔐 API key.
+* Metti le azioni distruttive (delete collection/memorie) in **expander con conferma** + colore “warning”.
+* Cards per “risposta” e “risultati simili” (puoi usare `st.markdown` con HTML minimale o `streamlit-extras` per cards).
+
+## Usabilità & feedback
+
+* **Disabilita** bottoni quando i prerequisiti mancano (es. niente “Indicizza” se non c’è progetto).
+* **Toasts/alert** chiari dopo azioni: `st.toast`, `st.success`, `st.error`.
+* **Copy-to-clipboard** per URL/token (con `st.code` + icona o component dedicato).
+* **Loading spinners** con messaggi utili (stai già usando `with st.spinner(...)`).
+
+## Stato & performance
+
+* Evita scritture su `st.session_state` **dopo** l’istanza dei widget (hai già corretto quel caso).
+* **Cache**:
+
+  * `@st.cache_data` per lista progetti/collezioni, caricamento ticket (con TTL).
+  * `@st.cache_resource` per client Chroma/YouTrack/embeddings.
+* **Forms** per minimizzare i rerun (soprattutto su chat e ingestion).
+* Usa **chiavi** consistenti per i widget (`key="llm_model"`, `key="show_memories"`, ecc.) — hai già normalizzato.
+
+## Tabelle & liste
+
+* Metti **paginazione** o filtri nella tabella Playbook (se crescono).
+  Valuta `st.data_editor` per editing inline (o conserva `st.dataframe` + azioni a lato).
+* Nei “Risultati simili”:
+
+  * Link ID **cliccabili** (risolto).
+  * MEM con **expander** per testo completo (già previsto).
+  * (Se aggiungi PDF) un’etichetta **[DOC]** con link alla pagina/URI.
+
+## Configurazione & Sicurezza
+
+* **Sectioning** nella sidebar:
+
+  * **Connessione YouTrack**
+  * **Vector DB / Collection**
+  * **Embeddings**
+  * **LLM**
+  * **Memoria Playbook**
+  * **Debug & Preferenze**
+* API Key OpenAI: maschera tipo password + avviso “non salvata”.
+* “Esporta preferenze” e “Ripristina default” (già presenti).
+
+## Accessibilità & i18n
+
+* Font leggibili, contrasto adeguato (tema Streamlit).
+* Testa con zoom 125–150% per layout responsive.
+* Se prevedi utenti non italiani, introduci switch **lingua** (dictionary in memoria o `gettext` semplice).
+
+---
+
+## Quando (e come) migrare a uno stack web “product-grade”
+
+Segnali che è ora:
+
+* serve **SSO**, ruoli/gruppi, audit trail;
+* pipeline ingestion **asinc** con code di background;
+* **routing/pagine** complesse, URL shareable di ricerche;
+* integrazione con sistemi esterni (notifiche, webhooks, CRM).
+
+Stack suggerito:
+
+* **Next.js (React)** + shadcn/ui per frontend.
+* **FastAPI** per backend RAG (endpoints: `/ingest`, `/query`, `/playbook`, `/facts`).
+* **DB**: Postgres (utenti/playbook/facts/telemetria) + **pgvector** o Chroma come servizio separato.
+* **Auth**: OIDC (Keycloak/Azure AD/Auth0) + **RBAC**.
+* **Workers**: Celery/Redis o Arq per ingestion/indexing.
+* **Telemetry**: OpenTelemetry + Grafana/Loki per log/metrics.
+
+---
+
+## TL;DR (consiglio operativo)
+
+* **Rimani su Streamlit** per l’attuale target (PoC/internal): migliora layout con **tabs + forms + status bar**, rafforza cache/stato, rifinisci la **tab Playbook** (paginazione, delete singolo, expander).
+* Prepara un **backend FastAPI** “thin” per la logica core (RAG/YouTrack/Chroma) come **step di transizione**: potrai riusarlo anche se (quando) passerai a React.
+
+Se vuoi, ti mando uno **scheletro di layout Streamlit** con tabs, forms e status bar già organizzati, pronto da incollare nel tuo `app.py` mantenendo tutta la logica attuale.
+
+
+
