@@ -262,3 +262,70 @@ Note puntuali sul codice attuale
 * SQLite + CRUD facts; UI “Aggiungi fatto”/“Dimentica”.
 * Serializzazione facts nel prompt; TTL/scadenze; validazioni basiche.
 * (Opzionale) boost nel retrieval basato su facts.
+
+# **PDF in KB**
+Aggiungere PDF può essere **molto utile** — a patto di farlo con alcune cautele per non “sporcare” le risposte. In breve: **separa la sorgente**, **chunking buono**, **provenienza chiara**, e **fusione controllata** con i ticket.
+
+## Quando ha senso
+
+* Manuali, runbook, KB esterne, RFC, guide vendor → **sì** (spesso completano i ticket).
+* Allegati rumorosi (log grezzi, report generici) → **no** o metti una soglia/qualità bassa.
+
+## Come integrarle senza confusione
+
+1. **Collection separata**
+   Metti i PDF in una collection Chroma distinta (es. `docs`) invece di mescolarli ai ticket (`tickets`) e ai playbook (`memories`).
+   → In query fai un **merge KB⊕MEM⊕DOCS** con **cap** per i DOCS (es. max 1–2) e soglia dedicata.
+
+2. **Chunking & overlap**
+
+   * Estrarre testo per pagina, poi spezzare in chunk di **~500–1000 token** con **overlap 100–150**.
+   * Conserva **page_number** e **section headings** se disponibili (titolo PDF, capitolo).
+
+3. **Metadati ricchi**
+
+   * `source="pdf"`, `title`, `page`, `project` (se pertinente), `product`, `tags`, `quality="verified|vendor|draft"`, `uri` (path o URL).
+   * Questo abilita filtri (es. restringi ai PDF del progetto corrente).
+
+4. **Provenienza chiara in UI**
+   Nei “Risultati simili” etichetta come **[DOC]** e rendi cliccabile il `uri` o “PDF p.12”.
+   Aggiungi un toggle “**Includi PDF**” in sidebar per chi vuole solo ticket.
+
+5. **Ranking/fusione**
+
+   * Mantieni soglie: **DIST_MAX_DOCS** uguale o leggermente più severa dei ticket.
+   * Applica **MMR leggero** nel merge per evitare tre snippet quasi identici dallo stesso PDF.
+   * **Cap DOCS** (1–2) così i ticket restano protagonisti.
+
+6. **Modello embeddings**
+
+   * Va bene `all-MiniLM-L6-v2` per PoC; se i PDF sono lunghi/tecnici e vedi risultati deboli, prova `text-embedding-3-large` per i **DOCS** (puoi embeddare docs con un modello e i ticket con un altro; tieni traccia in metadata e segnala il mismatch se cambi embedder in query).
+
+7. **Qualità e sicurezza**
+
+   * Evita PDF scannerizzati senza OCR (o attiva OCR).
+   * Non indicizzare PDF con PII/segretI se usi embeddings cloud.
+   * Aggiungi un campo `quality` e (opzionale) **TTL** anche per DOCS “temporanei”.
+
+## Mini-roadmap (sicura, in 2 passi)
+
+* **Sprint PDF-1 (ingest separato)**
+
+  * Sidebar: upload o cartella **“Documenti PDF”** → estrazione → chunking → embeddings → **collection `docs`**.
+  * Metadati: `title,page,uri,project,tags,quality`.
+* **Sprint PDF-2 (query & UI)**
+
+  * Retrieval combinato **KB⊕MEM⊕DOCS** (cap DOCS=1–2, MMR on).
+  * Toggle “Includi PDF” + etichetta **[DOC]** in output con link alla pagina.
+  * (Opzionale) Expander per mostrare l’estratto completo del chunk.
+
+## (Se vuoi gli snippet)
+
+Posso fornirti subito:
+
+* loader/estrattore PDF con `pypdf` e chunker,
+* funzione `ingest_pdfs_to_docs(persist_dir, path_glob="*.pdf")`,
+* patch di retrieval con terza sorgente `docs` + cap e rendering `[DOC]`.
+
+In sintesi: **sì, aggiungi i PDF**, ma **tenendoli separati** e con **cap/filtri**. Così ottieni più copertura informativa senza degradare la precisione delle risposte.
+
