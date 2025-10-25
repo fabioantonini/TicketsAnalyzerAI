@@ -608,7 +608,5 @@ Stack suggerito:
 * **Rimani su Streamlit** per l’attuale target (PoC/internal): migliora layout con **tabs + forms + status bar**, rafforza cache/stato, rifinisci la **tab Playbook** (paginazione, delete singolo, expander).
 * Prepara un **backend FastAPI** “thin” per la logica core (RAG/YouTrack/Chroma) come **step di transizione**: potrai riusarlo anche se (quando) passerai a React.
 
-Se vuoi, ti mando uno **scheletro di layout Streamlit** con tabs, forms e status bar già organizzati, pronto da incollare nel tuo `app.py` mantenendo tutta la logica attuale.
-
 
 
