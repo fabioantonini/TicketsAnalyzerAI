@@ -25,6 +25,7 @@ import typing
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 import re
+import shutil, subprocess
 
 # === Sticky prefs (Livello A) ===
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -87,6 +88,32 @@ def now_ts() -> int:
 
 def ts_in_days(days: int) -> int:
     return now_ts() + days * 24 * 3600
+
+def is_ollama_available() -> tuple[bool, str]:
+    """
+    Ritorna (available, host). Verifica via HTTP sull'host configurato
+    e, in fallback, la presenza del binario 'ollama'.
+    """
+    host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    # Tentativo HTTP rapido
+    try:
+        import requests  # lazy import
+        r = requests.get(f"{host}/api/tags", timeout=1)
+        if r.status_code < 500:
+            return True, host
+    except Exception:
+        pass
+    # Fallback: binario presente ed eseguibile
+    try:
+        if shutil.which("ollama"):
+            subprocess.run(
+                ["ollama", "list"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
+            )
+            return True, host
+    except Exception:
+        pass
+    return False, host
 
 # ------------------------------
 # Try imports con fallback/shim
@@ -281,8 +308,15 @@ class LLMBackend:
             if not api_key:
                 raise RuntimeError("OPENAI_API_KEY non impostata (inseriscila nella sidebar o come env var)")
             self.client = OpenAI(api_key=api_key)
+
         elif provider == "Ollama (locale)":
-            self.client = None  # REST semplice
+            ok, host = is_ollama_available()
+            if not ok:
+                raise RuntimeError("Ollama non è disponibile in questo ambiente: seleziona un provider OpenAI.")
+            # Nessun client SDK necessario: uso REST; salvo l’host per le chiamate
+            self.client = None
+            self.ollama_host = host  # es. "http://localhost:11434"
+
         else:
             raise RuntimeError("Provider LLM non supportato")
 
@@ -305,8 +339,10 @@ class LLMBackend:
                 )
                 return chat.choices[0].message.content or ""
         elif self.provider == "Ollama (locale)":
-            import requests, json
-            url = "http://localhost:11434/api/chat"
+            import requests
+            host = getattr(self, "ollama_host", "http://localhost:11434").rstrip("/")
+            url = f"{host}/api/chat"
+
             payload = {
                 "model": self.model_name,  # es. "llama3.2" o "llama3.2:latest"
                 "messages": [
@@ -316,6 +352,7 @@ class LLMBackend:
                 "stream": False,  # evita JSON concatenati
                 "options": {"temperature": self.temperature},  # Ollama supporta temperature
             }
+
             r = requests.post(url, json=payload, timeout=300)
             try:
                 r.raise_for_status()
@@ -355,7 +392,6 @@ class LLMBackend:
                     if isinstance(last, dict) and "content" in last:
                         return last["content"]
             return str(data)
-        return "Provider LLM non supportato"
 
 
 RAG_SYSTEM_PROMPT = (
@@ -596,14 +632,26 @@ def run_streamlit_app():
 
         st.markdown("---")
         st.header("LLM")
+
+        # Rilevamento Ollama
+        ollama_ok, ollama_host = is_ollama_available()
+        llm_provider_options = ["OpenAI"] + (["Ollama (locale)"] if ollama_ok else [])
+
+        # Indice di default coerente con prefs ma sicuro se Ollama NON c'è
+        pref_provider = prefs.get("llm_provider", "OpenAI")
+        default_idx = 0 if (pref_provider != "Ollama (locale)" or not ollama_ok) else 1
+
         llm_provider = st.selectbox(
             "Provider LLM",
-            ["OpenAI", "Ollama (locale)"],
-            index=(0 if prefs.get("llm_provider", "OpenAI") == "OpenAI" else 1),
+            llm_provider_options,
+            index=default_idx,
             key="llm_provider_select",
         )
 
-        # Se il provider cambia, resetta il modello al default del provider
+        if not ollama_ok:
+            st.caption("⚠️ Ollama non è disponibile in questo ambiente; opzione disabilitata.")
+
+        # Se cambia provider, resetta modello al default del provider selezionato
         prev_provider = st.session_state.get("last_llm_provider")
         if prev_provider != llm_provider:
             st.session_state["last_llm_provider"] = llm_provider
@@ -618,14 +666,13 @@ def run_streamlit_app():
         if "llm_model" not in st.session_state:
             st.session_state["llm_model"] = pref_llm_model or llm_model_default
         else:
-            # Se per qualunque motivo è vuoto, rimetto il default corretto
             if not (st.session_state["llm_model"] or "").strip():
                 st.session_state["llm_model"] = llm_model_default
 
         # Campo controllato via session_state
         llm_model = st.text_input("Modello LLM", key="llm_model")
 
-        # Slider temperatura
+        # Slider temperatura (come in tuo codice)
         if "llm_temperature" not in st.session_state:
             st.session_state["llm_temperature"] = float(prefs.get("llm_temperature", 0.2))
         llm_temperature = st.slider("Temperature", 0.0, 1.5, st.session_state["llm_temperature"], 0.05)
@@ -669,17 +716,24 @@ def run_streamlit_app():
         with c1:
             if st.button("Salva preferenze"):
                 if prefs_enabled:
+                    # --- Salva preferenze (versione coerente con disponibilità Ollama) ---
+                    # Coercizione provider: se Ollama non è disponibile, forza OpenAI
                     _provider_for_save = st.session_state.get("last_llm_provider", llm_provider)
+                    if not ollama_ok and _provider_for_save == "Ollama (locale)":
+                        _provider_for_save = "OpenAI"
+
+                    # Modello LLM: mai vuoto e coerente col provider scelto
                     _model_for_save = (st.session_state.get("llm_model") or "").strip()
                     if not _model_for_save:
                         _model_for_save = DEFAULT_LLM_MODEL if _provider_for_save == "OpenAI" else DEFAULT_OLLAMA_MODEL
+
                     save_prefs({
                         "yt_url": yt_url,
                         "persist_dir": persist_dir,
                         "emb_backend": st.session_state.get("last_emb_backend", emb_backend),
                         "emb_model_name": st.session_state.get("emb_model"),
-                        "llm_provider": st.session_state.get("last_llm_provider", llm_provider),
-                        "llm_model": _model_for_save,  # <<— usa sempre un valore non vuoto
+                        "llm_provider": _provider_for_save,       # <-- usa il provider coerente
+                        "llm_model": _model_for_save,             # <-- mai vuoto
                         "llm_temperature": st.session_state.get("llm_temperature", llm_temperature),
                         "max_distance": st.session_state.get("max_distance", max_distance),
                         "show_prompt": st.session_state.get("show_prompt", show_prompt),
