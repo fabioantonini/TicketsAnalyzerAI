@@ -1,0 +1,17 @@
+# Core app
+streamlit==1.38.0
+requests>=2.31.0
+pandas>=2.2.2
+chromadb>=0.4.22,<0.5
+
+# Cloud LLM
+openai>=1.40.0,<2
+tiktoken>=0.7.0
+
+# Embeddings/LLM locali (solo ambiente locale)
+sentence-transformers>=2.7.0
+# torch verrà risolta come dipendenza; se serve pin manuale:
+# torch>=2.3.0; platform_system!="Darwin" or platform_machine!="arm64"
+
+# Ollama client CLI (opzionale; non installabile su Streamlit Cloud)
+ollama>=0.1.0

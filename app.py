@@ -28,8 +28,9 @@ import re
 import shutil, subprocess
 
 # === Sticky prefs (Livello A) ===
+IS_CLOUD = bool(os.getenv("STREAMLIT_RUNTIME", "")) or bool(os.getenv("STREAMLIT_SERVER_HEADLESS", ""))
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-PREFS_PATH = os.path.join(APP_DIR, ".app_prefs.json")  # file locale, NON contiene segreti
+PREFS_PATH = os.path.join("/tmp", ".app_prefs.json") if IS_CLOUD else os.path.join(APP_DIR, ".app_prefs.json")
 
 NON_SENSITIVE_PREF_KEYS = {
     "yt_url",
@@ -162,7 +163,7 @@ except Exception:
 # ------------------------------
 # Costanti
 # ------------------------------
-DEFAULT_CHROMA_DIR = "data/chroma"
+DEFAULT_CHROMA_DIR = "/tmp/chroma" if IS_CLOUD else "data/chroma"
 DEFAULT_COLLECTION = "tickets"
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_LLM_MODEL = "gpt-4o"
@@ -282,15 +283,16 @@ class VectorStore:
             return -1
 
 def get_openai_key() -> Optional[str]:
-    # override da UI se presente
     try:
         import streamlit as st  # type: ignore
         ui_key = st.session_state.get("openai_key")
         if ui_key:
             return ui_key
+        # NEW: supporto Streamlit Cloud secrets
+        if hasattr(st, "secrets") and "OPENAI_API_KEY" in st.secrets:
+            return st.secrets["OPENAI_API_KEY"]
     except Exception:
         pass
-    # fallback: environment variables già usate in app
     return os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_EXPERIMENTS")
 
 # ------------------------------
@@ -443,14 +445,15 @@ def open_vector_in_session(persist_dir: str, collection_name: str):
 # UI principale Streamlit
 # ------------------------------
 def run_streamlit_app():
+    st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
     init_prefs_in_session()
     prefs = st.session_state.get("prefs", {})
 
-    st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
     st.title("YouTrack RAG Support")
     st.caption("Gestione ticket di supporto basata su storico YouTrack + RAG + LLM")
 
     with st.sidebar:
+        quit_btn = False
         st.header("Connessione YouTrack")
         yt_url = st.text_input("Server URL", value=prefs.get("yt_url", ""), placeholder="https://<org>.myjetbrains.com/youtrack")
         yt_token = st.text_input("Token (Bearer)", type="password")
@@ -589,12 +592,15 @@ def run_streamlit_app():
 
         st.header("Embeddings")
 
-        emb_provider_key = "emb_provider_select"
+        emb_backends = ["OpenAI"]
+        if SentenceTransformer is not None and not IS_CLOUD:
+            emb_backends.insert(0, "Locale (sentence-transformers)")
+
         emb_backend = st.selectbox(
             "Provider embeddings",
-            ["Locale (sentence-transformers)", "OpenAI"],
-            index=(0 if prefs.get("emb_backend", "Locale (sentence-transformers)") == "Locale (sentence-transformers)" else 1),
-            key=emb_provider_key,
+            emb_backends,
+            index=0 if "OpenAI" in emb_backends else 0,
+            key="emb_provider_select",
         )
 
         # Reset del modello se cambia il provider
@@ -800,7 +806,11 @@ def run_streamlit_app():
                 except Exception as e:
                     st.error(f"Errore eliminazione memorie: {e}")
         st.markdown("---")
-        quit_btn = st.button("Quit")
+        if not IS_CLOUD:
+            quit_btn = st.button("Quit")
+            if quit_btn:
+                st.write("Chiusura applicazione...")
+                os._exit(0)
         # Apertura automatica della collection selezionata (senza dover re-indicizzare)
         # Evita l'apertura se l'utente ha scelto "Crea nuova…" ma non ha digitato un nome diverso da default
         vector_ready = False

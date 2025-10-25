@@ -1,11 +1,14 @@
-# Requirements for Streamlit RAG Support App
-streamlit>=1.31.0
+# Core app
+streamlit==1.38.0
 requests>=2.31.0
-pandas>=2.2.0
-chromadb>=0.4.22
-sentence-transformers>=2.6.0
-openai>=1.12.0
-tiktoken>=0.6.0
+pandas>=2.2.2
 
-# Optional for local LLMs
-ollama>=0.1.0
+# Chroma: tieni la serie 0.4.x per evitare breaking changes 0.5.x
+chromadb>=0.4.22,<0.5
+
+# OpenAI SDK recente (Responses API + compat chat)
+openai>=1.40.0,<2
+tiktoken>=0.7.0
+
+# NOTA: su Streamlit Cloud non installare modelli locali
+# sentence-transformers e ollama sono volutamente esclusi
