@@ -132,7 +132,7 @@ Memorizzare **coppie chiave–valore** affidabili (facts) separate dai playbook 
         source_ticket TEXT, created_at INT, expires_at INT,
         confidence REAL DEFAULT 1.0,
         UNIQUE(user, project, key))
-````
+
 
 * **UI**: in chat pillola “➕ Aggiungi fatto” → modale (project, key, value, TTL).
   Lista “Fatti attivi per X” con **Modifica / Dimentica / Estendi TTL**.
