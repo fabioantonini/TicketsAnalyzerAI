@@ -28,9 +28,48 @@ import re
 import shutil, subprocess
 
 # === Sticky prefs (Livello A) ===
-IS_CLOUD = bool(os.getenv("STREAMLIT_RUNTIME", "")) or bool(os.getenv("STREAMLIT_SERVER_HEADLESS", ""))
+import os
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def is_cloud() -> bool:
+    try:
+        import streamlit as st  # type: ignore
+        if hasattr(st, "secrets") and str(st.secrets.get("DEPLOY_ENV", "")).lower() == "cloud":
+            return True
+    except Exception:
+        pass
+    # fallback (heuristic): repo non scrivibile => trattala come cloud
+    try:
+        test_path = os.path.join(APP_DIR, ".write_test")
+        with open(test_path, "w") as f:
+            f.write("x")
+        os.remove(test_path)
+        return False
+    except Exception:
+        return True
+
+IS_CLOUD = is_cloud()
+
+def pick_default_chroma_dir() -> str:
+    env_dir = os.getenv("CHROMA_DIR")
+    if env_dir:
+        return env_dir
+    # supporto anche a st.secrets["CHROMA_DIR"]
+    try:
+        import streamlit as st  # type: ignore
+        sec_dir = st.secrets.get("CHROMA_DIR") if hasattr(st, "secrets") else None
+        if sec_dir:
+            return str(sec_dir)
+    except Exception:
+        pass
+    return "/tmp/chroma" if IS_CLOUD or not os.access(APP_DIR, os.W_OK) else os.path.join(APP_DIR, "data", "chroma")
+
+DEFAULT_CHROMA_DIR = pick_default_chroma_dir()
+
+# Preferences path: scrivi su /tmp in cloud
 PREFS_PATH = os.path.join("/tmp", ".app_prefs.json") if IS_CLOUD else os.path.join(APP_DIR, ".app_prefs.json")
+
 
 NON_SENSITIVE_PREF_KEYS = {
     "yt_url",
@@ -65,10 +104,17 @@ def save_prefs(prefs: dict):
         print(f"[WARN] save_prefs: {e}")
 
 def init_prefs_in_session():
-    # carica da file una sola volta
-    if "prefs_loaded" not in st.session_state:
-        st.session_state["prefs_loaded"] = True
-        st.session_state["prefs"] = load_prefs()
+    prefs = load_prefs() or {}
+
+    pd = (prefs.get("persist_dir") or "").strip()
+    if not pd:
+        prefs["persist_dir"] = DEFAULT_CHROMA_DIR
+    else:
+        if IS_CLOUD and not pd.startswith("/tmp/"):
+            prefs["persist_dir"] = DEFAULT_CHROMA_DIR
+
+    st.session_state["prefs"] = prefs
+
 
 def one_line_preview(text: str, maxlen: int = 160) -> str:
     """Rende il testo su una riga, rimuove bullet/extra spazi e tronca."""
@@ -163,7 +209,6 @@ except Exception:
 # ------------------------------
 # Costanti
 # ------------------------------
-DEFAULT_CHROMA_DIR = "/tmp/chroma" if IS_CLOUD else "data/chroma"
 DEFAULT_COLLECTION = "tickets"
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_LLM_MODEL = "gpt-4o"
@@ -253,6 +298,15 @@ class EmbeddingBackend:
             return [d.embedding for d in res.data]  # type: ignore
         return self.model.encode(texts, normalize_embeddings=True).tolist()  # type: ignore
 
+def get_chroma_client(persist_dir: str):
+    """Crea la cartella se manca e restituisce un PersistentClient pronto."""
+    if chromadb is None:
+        raise RuntimeError("chromadb non disponibile")
+    os.makedirs(persist_dir, exist_ok=True)
+    return chromadb.PersistentClient(
+        path=persist_dir,
+        settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
+    )
 
 # ------------------------------
 # VectorStore (Chroma wrapper)
@@ -263,6 +317,7 @@ class VectorStore:
             raise RuntimeError("chromadb non disponibile")
         self.persist_dir = persist_dir
         self.collection_name = collection_name
+        os.makedirs(self.persist_dir, exist_ok=True)
         self.client = chromadb.PersistentClient(
             path=persist_dir,
             settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
@@ -288,7 +343,6 @@ def get_openai_key() -> Optional[str]:
         ui_key = st.session_state.get("openai_key")
         if ui_key:
             return ui_key
-        # NEW: supporto Streamlit Cloud secrets
         if hasattr(st, "secrets") and "OPENAI_API_KEY" in st.secrets:
             return st.secrets["OPENAI_API_KEY"]
     except Exception:
@@ -463,15 +517,15 @@ def run_streamlit_app():
         st.markdown("---")
         st.header("Vector DB")
         persist_dir = st.text_input("Chroma path", value=prefs.get("persist_dir", DEFAULT_CHROMA_DIR), key="persist_dir")
+        # Patch 6: crea la dir e mostra il path attuale
+        os.makedirs(persist_dir, exist_ok=True)
+        st.caption(f"Chroma path attuale: {persist_dir}")
 
         # Leggi le collections esistenti
         coll_options = []
         try:
             if chromadb is not None:
-                _client = chromadb.PersistentClient(
-                    path=persist_dir,
-                    settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
-                )
+                _client = get_chroma_client(persist_dir)
                 coll_options = [c.name for c in _client.list_collections()]  # type: ignore
         except Exception as e:
             st.caption(f"Impossibile leggere le collections da '{persist_dir}': {e}")
@@ -541,10 +595,7 @@ def run_streamlit_app():
                 st.warning("Spunta la casella di conferma per procedere con l'eliminazione.")
             else:
                 try:
-                    _client = chromadb.PersistentClient(
-                        path=persist_dir,
-                        settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
-                    )
+                    _client = get_chroma_client(persist_dir)
                     _client.delete_collection(name=collection_name)
 
                     # Rimuovi eventuale meta della collection (provider/modello)
@@ -640,7 +691,7 @@ def run_streamlit_app():
         st.header("LLM")
 
         # Rilevamento Ollama
-        ollama_ok, ollama_host = is_ollama_available()
+        ollama_ok, ollama_host = (False, None) if IS_CLOUD else is_ollama_available()
         llm_provider_options = ["OpenAI"] + (["Ollama (locale)"] if ollama_ok else [])
 
         # Indice di default coerente con prefs ma sicuro se Ollama NON c'è
@@ -796,10 +847,7 @@ def run_streamlit_app():
             mem_del_confirm = st.checkbox("Conferma cancella memorie", value=False)
             if st.button("Elimina tutte le memorie", disabled=not mem_del_confirm):
                 try:
-                    _client = chromadb.PersistentClient(
-                        path=persist_dir,
-                        settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
-                    )
+                    _client = get_chroma_client(persist_dir)
                     _client.delete_collection(name=MEM_COLLECTION)
                     _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
                     st.success("Memorie eliminate.")
@@ -807,10 +855,12 @@ def run_streamlit_app():
                     st.error(f"Errore eliminazione memorie: {e}")
         st.markdown("---")
         if not IS_CLOUD:
-            quit_btn = st.button("Quit")
+            quit_btn = st.button("Quit", use_container_width=True)
             if quit_btn:
                 st.write("Chiusura applicazione...")
                 os._exit(0)
+        st.caption(f"IS_CLOUD={IS_CLOUD} · Chroma dir={st.session_state['prefs'].get('persist_dir', DEFAULT_CHROMA_DIR)}")
+
         # Apertura automatica della collection selezionata (senza dover re-indicizzare)
         # Evita l'apertura se l'utente ha scelto "Crea nuova…" ma non ha digitato un nome diverso da default
         vector_ready = False
@@ -927,10 +977,7 @@ def run_streamlit_app():
     if st.session_state.get("show_memories"):
         st.subheader("Playbook salvati (memories)")
         try:
-            _client = chromadb.PersistentClient(
-                path=persist_dir,
-                settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
-            )
+            _client = get_chroma_client(persist_dir)
             _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
 
             total = _mem.count()
@@ -1080,10 +1127,7 @@ def run_streamlit_app():
                 mem_retrieved = []
                 if st.session_state.get("enable_memory", False):
                     try:
-                        _client = chromadb.PersistentClient(
-                            path=persist_dir,
-                            settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
-                        )
+                        _client = get_chroma_client(persist_dir)
                         _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
                         mem_res = _mem.query(query_embeddings=q_emb, n_results=min(5, top_k))
                         mem_docs  = mem_res.get("documents", [[]])[0]
@@ -1223,10 +1267,7 @@ def run_streamlit_app():
                         st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
                     mem_emb = st.session_state["embedder"].embed([playbook_text])[0]
 
-                    _client = chromadb.PersistentClient(
-                        path=persist_dir,
-                        settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
-                    )
+                    _client = get_chroma_client(persist_dir)
                     _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
                     mem_id = f"mem::{uuid.uuid4().hex[:12]}"
                     _mem.add(ids=[mem_id], documents=[playbook_text], metadatas=[meta], embeddings=[mem_emb])
