@@ -299,14 +299,22 @@ class EmbeddingBackend:
         return self.model.encode(texts, normalize_embeddings=True).tolist()  # type: ignore
 
 def get_chroma_client(persist_dir: str):
-    """Crea la cartella se manca e restituisce un PersistentClient pronto."""
-    if chromadb is None:
-        raise RuntimeError("chromadb non disponibile")
+    """Crea la cartella e restituisce un PersistentClient Chroma."""
+    try:
+        import chromadb  # import lazy (niente globale)
+        from chromadb.config import Settings as ChromaSettings
+    except Exception as e:
+        # diagnostica esplicita
+        st.error("ChromaDB non importabile in questo ambiente.")
+        st.exception(e)
+        raise
+
     os.makedirs(persist_dir, exist_ok=True)
     return chromadb.PersistentClient(
         path=persist_dir,
-        settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
+        settings=ChromaSettings(anonymized_telemetry=False)
     )
+
 
 # ------------------------------
 # VectorStore (Chroma wrapper)
