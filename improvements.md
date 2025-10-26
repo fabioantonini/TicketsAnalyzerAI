@@ -1,280 +1,306 @@
 # Improvements
 
-## Must have (per una PoC convincente)
+## Must have (for a convincing PoC)
 
-### 1) Sync incrementale e upsert
-- Scarica oltre **500 issue** con paginazione (`$skip`/`$top`) e solo i cambiamenti recenti (`updatedSince`).
-- Evita doppioni usando **upsert** (o `add` con `try/except` su ID già presenti) e salva un `last_sync.json` nel `persist_dir`.
-- Salva nel **metadata** della collection il **nome del modello di embedding** e verifica la coerenza in query (se cambia modello, avvisa o crea una nuova collection).
-- _Nota_: oggi indicizzi `summary + description` correttamente tramite `text_blob`, quindi i testi completi entrano nel Vector DB.
+### 1) Incremental sync and upsert
 
-### 2) Chunking dei ticket lunghi
-- Spezza descrizioni molto grandi in **chunk** con overlap (es. **512–800 token** con **80** di overlap).
-- Metadati consigliati: `parent_id`, `chunk_id`, `pos`.
-- Migliora **recall** e riduce il “rumore” da descrizioni enciclopediche.
+* Download more than **500 issues** with pagination (`$skip`/`$top`) and only recent changes (`updatedSince`).
+* Avoid duplicates using **upsert** (or `add` with `try/except` on existing IDs) and save a `last_sync.json` in the `persist_dir`.
+* Save in the **collection metadata** the **embedding model name** and verify consistency during query (if model changes, warn or create a new collection).
+* *Note*: currently, you index `summary + description` correctly via `text_blob`, so full texts are included in the Vector DB.
 
-### 3) Retrieval migliore: MMR e mini re-ranking
-- Dopo la query **top-k** di Chroma, applica **MMR (Maximal Marginal Relevance)** lato client per diversificare i risultati.
-- Facoltativo: usa un **CrossEncoder** leggero (es. `cross-encoder/ms-marco-MiniLM-L-6-v2`) per ri-ordinare i top-20.
+### 2) Chunking of long tickets
 
-### 4) UX: link, filtro e feedback
-- Rendi **cliccabili** gli ID dei ticket verso YouTrack (colonna con URL tipo `BASE_URL/youtrack/issue/ID` o `BASE_URL/issue/ID` in base all’istanza).
-- Aggiungi un **filtro testuale** sui ticket caricati.
-- **Thumbs up/down** sulla risposta e salva feedback in CSV per migliorare il prompt e valutare il **top-k hit rate**.
+* Split very large descriptions into **chunks** with overlap (e.g. **512–800 tokens** with **80** overlap).
+* Suggested metadata: `parent_id`, `chunk_id`, `pos`.
+* Improves **recall** and reduces “noise” from encyclopedic descriptions.
 
-### 5) Robustezza OpenAI e segreti
-- Leggi la chiave da **`st.secrets`** o da `OPENAI_API_KEY`, mantenendo compatibilità con l’`env` attuale.
-- `LLMBackend`: mantieni il **fallback** _Responses API → Chat Completions_, ma rendi l’estrazione del testo più resiliente.
-- **Mai** salvare il token YouTrack nei metadati del Vector DB.
+### 3) Better retrieval: MMR and mini re-ranking
 
-### 6) Cache e prestazioni
-- Usa `st.cache_resource` per i client **Chroma**, **SentenceTransformer** e **YouTrackClient**.
-- Usa `st.cache_data` per **`list_projects`** / **`list_issues`**.
-- Migliora sensibilmente la reattività sui ricarichi.
+* After Chroma **top-k** query, apply **MMR (Maximal Marginal Relevance)** on the client side to diversify results.
+* Optional: use a lightweight **CrossEncoder** (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`) to re-rank the top-20.
+
+### 4) UX: links, filter, and feedback
+
+* Make ticket IDs **clickable** to YouTrack (column with URL like `BASE_URL/youtrack/issue/ID` or `BASE_URL/issue/ID` depending on instance).
+* Add a **text filter** for loaded tickets.
+* **Thumbs up/down** on the answer and save feedback to CSV to improve the prompt and assess **top-k hit rate**.
+
+### 5) OpenAI robustness and secrets
+
+* Read the key from **`st.secrets`** or `OPENAI_API_KEY`, maintaining compatibility with current `env`.
+* `LLMBackend`: keep **fallback** *Responses API → Chat Completions*, but make text extraction more robust.
+* **Never** save the YouTrack token in Vector DB metadata.
+
+### 6) Cache and performance
+
+* Use `st.cache_resource` for **Chroma**, **SentenceTransformer**, and **YouTrackClient** clients.
+* Use `st.cache_data` for **`list_projects`** / **`list_issues`**.
+* Significantly improves reload responsiveness.
 
 ---
 
 ## Nice to have
 
 ### 7) Hybrid search
-- **BM25/keywords pre-filter** sui candidate (es. con `rapidfuzz` o `rank-bm25`) e poi **rerank** semantico.
-- Utile su testi tecnici con termini “forti”.
 
-### 8) Modelli multilingua e configurabilità
-- Default embedding più adatto all’italiano: `paraphrase-multilingual-MiniLM-L12-v2` (selezionabile da UI).
-- Mantieni compatibilità con l’attuale `all-MiniLM-L6-v2`.
+* **BM25/keywords pre-filter** on candidates (e.g. using `rapidfuzz` or `rank-bm25`), then **semantic rerank**.
+* Useful for technical texts with “strong” terms.
 
-### 9) Prompting e sicurezza
-- **Prompt injection guard**: racchiudi il contesto tra tag “Context Begin/End” e chiedi sempre citazioni `[ID-TICKET]` (già previsto dal system prompt).
-- Trunca output e invita l’utente a precisare quando il contesto è debole.
+### 8) Multilingual and configurable models
 
-### 10) Valutazioni rapide integrate
-- Tab **“Eval”** con 5–10 query dorate (FAQ reali) e mostra **precision@k**, **MRR**, **nDCG**.
-- Un grafico + una tabella bastano a “vendere” la PoC.
+* Default embedding better suited for Italian: `paraphrase-multilingual-MiniLM-L12-v2` (selectable from UI).
+* Keep compatibility with current `all-MiniLM-L6-v2`.
+
+### 9) Prompting and security
+
+* **Prompt injection guard**: wrap the context between “Context Begin/End” tags and always request citations `[TICKET-ID]` (already provided by the system prompt).
+* Truncate output and invite user clarification when context is weak.
+
+### 10) Integrated quick evaluations
+
+* **“Eval”** tab with 5–10 golden queries (real FAQs) showing **precision@k**, **MRR**, **nDCG**.
+* A chart + table are enough to “sell” the PoC.
 
 ### 11) UI polishing
-- Loader e progress bar durante ingest; **badge** in sidebar con count documenti.
-- Dataframe largo con colonne configurate (hai già `layout="wide"`: bene).
+
+* Loader and progress bar during ingestion; **badge** in sidebar with document count.
+* Wide dataframe with configured columns (you already have `layout="wide"`: good).
 
 ---
 
-## Alcuni suggerimenti
+## Some suggestions
 
-1) **Segreti e chiavi OpenAI** più robusti.  
-2) **Paginazione** e **sync incrementale** YouTrack.  
-3) **Chunking** durante ingest.  
-4) **MMR** dopo la query (recupera anche gli embedding dei vicini o ricalcola lato client; riordina con `mmr(...)`).  
-5) **Link** agli issue nella tabella.  
-6) **Cache** veloce:
-   - Decora `list_projects` / `list_issues` con `st.cache_data`.
-   - Costruisci Chroma/SentenceTransformer con `st.cache_resource`.
-7) **Qualità della vita (UI)**:
-   - `text_input` per filtrare i ticket mostrati (summary/description) _prima_ dell’ingest.
-   - Sostituisci `os._exit(0)` con una nota (chiudere da console) o un endpoint di shutdown; `os._exit` può troncare senza cleanup.
+1. **More robust OpenAI secrets and keys**.
+2. **YouTrack pagination** and **incremental sync**.
+3. **Chunking** during ingestion.
+4. **MMR** post-query (retrieve neighbor embeddings or recompute client-side; reorder with `mmr(...)`).
+5. **Links** to issues in the table.
+6. **Fast cache**:
 
----
+   * Decorate `list_projects` / `list_issues` with `st.cache_data`.
+   * Build Chroma/SentenceTransformer with `st.cache_resource`.
+7. **UI quality of life**:
 
-## Note puntuali sul codice attuale
-- L’UI è già **wide** e la tabella usa un **width** parametrico: bene.  
-- L’ingest indicizza **summary** e **description** (via `text_blob`): bene.  
-- `LLMBackend`: ottimo il fallback **Responses → Chat Completions**; rendi solo più robusta l’estrazione del testo e centralizza la gestione della chiave.
+   * `text_input` to filter displayed tickets (summary/description) *before* ingestion.
+   * Replace `os._exit(0)` with a note (close from console) or a shutdown endpoint; `os._exit` may terminate without cleanup.
 
 ---
 
-## Roadmap Memoria
+## Notes on current code
 
-### Livello A — Sticky prefs (✅ fatto)
-- Preferenze non sensibili su `.app_prefs.json`, reset automatico dei modelli al cambio provider, validazioni.  
-  _Nulla da fare, al massimo piccoli tweak UX._
+* UI is already **wide** and table uses a **parametric width**: good.
+* Ingestion indexes **summary** and **description** (via `text_blob`): good.
+* `LLMBackend`: great fallback **Responses → Chat Completions**; just make text extraction more robust and centralize key management.
 
-### Livello B — “Solution memory” (playbook) (🟡 quasi completo)
+---
 
-**Già fatto**
-- Collection separata **`memories`** (Chroma) con **TTL**.
-- Salvataggio playbook (“Segna come risolto”) con **condensazione 3–6 frasi**.
-- Retrieval combinato **KB ⊕ MEM** (stessa soglia), provenienza **[MEM]**, **anteprima/expander**.
-- Vista **“Playbook salvati”** (tabella), **delete-all**, toggle sticky per mostra/nascondi.
+## Memory Roadmap
 
-**Mancanti/consigliati**
-1. **Qualità e tagging avanzato**
-   - Campo `quality` da UI: `verified | draft` (ora hardcoded).
-   - Tag aggiuntivi in salvataggio (textbox CSV).
-   - Filtro per `project`/`tags` nel retrieval MEM (limita al progetto corrente se presente).
-2. **Gestione per-singolo playbook**
-   - **Cancella singolo** (icona cestino in tabella).
-   - **Modifica testo** (expander + `st.text_area`) e **re-embed** opzionale.
-3. **Compatibilità embedder**
-   - Metadati: `mem_embed_provider`, `mem_embed_model`.
-   - Avviso se MEM ≠ embedder corrente; **re-embed on-demand**.
-4. **UX/Performance elenco**
-   - **Paginazione** (batch 200) + “Carica altri”.
-   - **Ricerca** locale (doc/tags/project).
-   - **Export** CSV/Markdown.
-5. **Merging e ranking**
-   - **MMR** sul merge KB⊕MEM per evitare ridondanze.
-   - **Cap** MEM configurabile (0–3) + soglia dedicata opzionale.
-6. **Conferma & policy**
-   - Dialog “Confermi di memorizzare?” (NO-PII reminder).
-   - Template di condensazione più “procedurale”.
-7. **Metriche (debug)**
-   - Caption con distanze MEM, tempo embedding/query.
-   - Contatore di utilizzo (`uses`) nel metadata.
+### Level A — Sticky prefs (✅ done)
 
-### Livello C — “Facts strutturati” (🔜 da implementare)
+* Non-sensitive preferences in `.app_prefs.json`, automatic model reset on provider change, validations.
+  *Nothing to do, maybe small UX tweaks.*
 
-**Obiettivo**  
-Memorizzare **coppie chiave–valore** affidabili (facts) separate dai playbook e inserirle nel prompt come **contesto strutturato**.
+### Level B — “Solution memory” (playbook) (🟡 almost complete)
 
-**Design proposto**
-- **Storage**: SQLite `facts.db`, tabella:
+**Already implemented**
+
+* Separate **`memories`** collection (Chroma) with **TTL**.
+* Playbook saving (“Mark as resolved”) with **3–6 sentence condensation**.
+* Combined retrieval **KB ⊕ MEM** (same threshold), provenance **[MEM]**, **preview/expander**.
+* **“Saved Playbooks”** view (table), **delete-all**, sticky toggle to show/hide.
+
+**Missing/recommended**
+
+1. **Advanced quality and tagging**
+
+   * `quality` field from UI: `verified | draft` (currently hardcoded).
+   * Additional tags in save (CSV textbox).
+   * Filter by `project`/`tags` in MEM retrieval (limit to current project if present).
+2. **Per-playbook management**
+
+   * **Delete single** (trash icon in table).
+   * **Edit text** (expander + `st.text_area`) and optional **re-embed**.
+3. **Embedder compatibility**
+
+   * Metadata: `mem_embed_provider`, `mem_embed_model`.
+   * Warning if MEM ≠ current embedder; **re-embed on-demand**.
+4. **UX/Performance listing**
+
+   * **Pagination** (batch 200) + “Load more”.
+   * **Local search** (doc/tags/project).
+   * **Export** CSV/Markdown.
+5. **Merging and ranking**
+
+   * **MMR** on KB⊕MEM merge to avoid redundancy.
+   * Configurable **cap** MEM (0–3) + optional dedicated threshold.
+6. **Confirmation & policy**
+
+   * Dialog “Confirm to store?” (NO-PII reminder).
+   * More “procedural” condensation template.
+7. **Metrics (debug)**
+
+   * Caption with MEM distances, embedding/query time.
+   * Usage counter (`uses`) in metadata.
+
+### Level C — “Structured facts” (🔜 to implement)
+
+**Goal**
+Store reliable **key–value pairs (facts)** separate from playbooks and insert them into the prompt as **structured context**.
+
+**Proposed design**
+
+* **Storage**: SQLite `facts.db`, table:
+
   ```sql
   facts(user TEXT, project TEXT, key TEXT, value TEXT,
         source_ticket TEXT, created_at INT, expires_at INT,
         confidence REAL DEFAULT 1.0,
         UNIQUE(user, project, key))
+  ```
 
+- **UI**: in chat, pill “➕ Add fact” → modal (project, key, value, TTL).
+  List “Active facts for X” with **Edit / Forget / Extend TTL**.
+- **Prompting**: before the answer, serialize facts in **2–4 lines** (`project=NETKB; gateway_vendor=Acme; ...`) and ask the model to **not contradict them**.
+- **Expiration & guardrails**: TTL, `expires_at` filter, **no PII/secret** (basic regex).
+- **Search**: use facts to **boost retrieval** (e.g. `product=XYZ` → favor docs with matching tags).
+- **Operations**: `upsert` per-project key, button “Forget this fact”.
 
-* **UI**: in chat pillola “➕ Aggiungi fatto” → modale (project, key, value, TTL).
-  Lista “Fatti attivi per X” con **Modifica / Dimentica / Estendi TTL**.
-* **Prompting**: prima della risposta serializza i facts in **2–4 righe** (`project=NETKB; gateway_vendor=Acme; ...`) e chiedi al modello di **non contraddirli**.
-* **Scadenze & guardrail**: TTL, filtro `expires_at`, **no PII/secret** (regex basiche).
-* **Ricerca**: usa facts per **boost** nel retrieval (es. `product=XYZ` → favorisci doc con tag corrispondenti).
-* **Operazioni**: `upsert` per key per-progetto, pulsante “Dimentica questo fatto”.
+### Pragmatic plan (2 mini-sprints)
 
-### Piano pragmatico (2 mini-sprint)
+**Sprint 1 – Level B refinements**
+Delete/edit/re-embed playbooks; UI `quality`; search/pagination; CSV export; embedder metadata + mismatch warning; MEM cap + MMR.
 
-**Sprint 1 – Rifiniture Livello B**
-Elimina/modifica/ri-embed per playbook; `quality` da UI; ricerca/paginazione; export CSV; metadati embedder + avviso mismatch; cap MEM + MMR.
-
-**Sprint 2 – MVP Livello C**
-SQLite + CRUD facts; serializzazione nel prompt; TTL/scadenze; validazioni basiche; (opz.) boost retrieval dai facts.
+**Sprint 2 – Level C MVP**
+SQLite + CRUD facts; prompt serialization; TTL/expiration; basic validations; (opt.) retrieval boost from facts.
 
 ---
 
 ## PDF in KB
 
-Aggiungere PDF può essere **molto utile** — a patto di farlo con cautele per non “sporcare” le risposte. In breve: **sorgente separata**, **chunking corretto**, **provenienza chiara**, **fusione controllata** con i ticket.
+Adding PDFs can be **very useful** — provided it’s done carefully to avoid “polluting” responses. In short: **separate source**, **proper chunking**, **clear provenance**, **controlled merging** with tickets.
 
-### Quando ha senso
+### When it makes sense
 
-* Manuali, runbook, KB esterne, RFC, guide vendor → **sì**.
-* Allegati rumorosi (log grezzi, report generici) → **no** o **qualità bassa**.
+* Manuals, runbooks, external KBs, RFCs, vendor guides → **yes**.
+* Noisy attachments (raw logs, generic reports) → **no** or **low quality**.
 
-### Come integrarli senza confusione
+### How to integrate without confusion
 
-1. **Collection separata**: `docs` distinta da `tickets`/`memories`. In query fai **KB ⊕ MEM ⊕ DOCS** con **cap DOCS** (1–2) e **soglia dedicata**.
-2. **Chunking & overlap**: ~**500–1000 token**, **overlap 100–150**, conserva `page_number` e titoli/heading.
-3. **Metadati ricchi**: `source="pdf"`, `title`, `page`, `project`, `product`, `tags`, `quality`, `uri`.
-4. **Provenienza chiara in UI**: etichetta **[DOC]** e link “PDF p.12”; toggle “**Includi PDF**” in sidebar.
-5. **Ranking/fusione**: soglia DOCS ~ ticket o più severa, **MMR** sul merge, **cap DOCS** 1–2.
-6. **Modello embeddings**: ok `all-MiniLM-L6-v2`; per documenti tecnici lunghi valuta `text-embedding-3-large`.
-7. **Qualità & sicurezza**: evita scannerizzati senza OCR; no PII/secret; `quality` e (opz.) **TTL**.
+1. **Separate collection**: `docs` distinct from `tickets`/`memories`. Query as **KB ⊕ MEM ⊕ DOCS** with **DOCS cap** (1–2) and **dedicated threshold**.
+2. **Chunking & overlap**: ~**500–1000 tokens**, **overlap 100–150**, preserve `page_number` and headings.
+3. **Rich metadata**: `source="pdf"`, `title`, `page`, `project`, `product`, `tags`, `quality`, `uri`.
+4. **Clear provenance in UI**: label **[DOC]** and link “PDF p.12”; toggle “**Include PDF**” in sidebar.
+5. **Ranking/merge**: DOCS threshold ~ ticket or stricter, **MMR** on merge, **DOCS cap** 1–2.
+6. **Embeddings model**: `all-MiniLM-L6-v2` is fine; for long technical documents consider `text-embedding-3-large`.
+7. **Quality & security**: avoid non-OCR-scanned files; no PII/secret; `quality` and (opt.) **TTL**.
 
 **Mini-roadmap**
 
-* **PDF-1 (ingest)**: upload/cartella “Documenti PDF” → estrazione → chunking → embeddings → collection `docs` (metadati `title,page,uri,project,tags,quality`).
-* **PDF-2 (query & UI)**: merge **KB⊕MEM⊕DOCS**, cap DOCS=1–2, MMR on; toggle “Includi PDF”; rendering `[DOC]`.
+* **PDF-1 (ingest)**: upload/folder “PDF Documents” → extraction → chunking → embeddings → `docs` collection (metadata `title,page,uri,project,tags,quality`).
+* **PDF-2 (query & UI)**: merge **KB⊕MEM⊕DOCS**, DOCS cap=1–2, MMR on; toggle “Include PDF”; render `[DOC]`.
 
 ---
 
-## Metriche di valutazione
+## Evaluation metrics
 
-### 1) Dataset di valutazione (gold set)
+### 1) Evaluation dataset (gold set)
 
-* **Raccolta** (50–200 casi): per ogni ticket *Q* definisci **`answer_gold`** e **`doc_gold`**; includi casi facili e rumorosi.
-* **Normalizzazione**: pulizia testi solo per matching.
+* **Collection** (50–200 cases): for each ticket *Q* define **`answer_gold`** and **`doc_gold`**; include both easy and noisy cases.
+* **Normalization**: clean texts for matching.
 * **Split**: 80% *dev*, 20% *hold-out*.
 
-> Se usi playbook, aggiungi `mem_gold` per ~30% dei casi.
+> If using playbooks, add `mem_gold` for ~30% of cases.
 
-### 2) Valutazione Retrieval (senza LLM)
+### 2) Retrieval evaluation (without LLM)
 
-* Esegui la pipeline di **embedding + nearest neighbors** su `tickets` (e `memories` se attivo).
-* Metriche KB: **Recall@k**, **Hit@k**, **MRR@k**, **nDCG@k**.
-* Metriche MEM: **Hit@k(mem)**, **Coverage MEM**.
-* Analisi soglie: curva **Recall@k** variando **distanza max** e **top-k**; scegli il **punto di lavoro**.
-* A/B tecnici: confronta embedder/parametri sullo stesso gold.
+* Run **embedding + nearest neighbors** pipeline on `tickets` (and `memories` if active).
+* KB metrics: **Recall@k**, **Hit@k**, **MRR@k**, **nDCG@k**.
+* MEM metrics: **Hit@k(mem)**, **MEM Coverage**.
+* Threshold analysis: **Recall@k** curve varying **max distance** and **top-k**; choose **operating point**.
+* Technical A/B: compare embedder/parameters on same gold.
 
-### 3) Valutazione Generazione (con LLM)
+### 3) Generation evaluation (with LLM)
 
-* **EM/F1** per risposte brevi; **ROUGE-L** per discorsive.
-* **Groundedness & Faithfulness**: % frasi supportate, no-contradiction (NLI/regex), **attribution rate**.
-* Target: **EM/F1 ≥ 0.6**, **ROUGE-L ≥ 0.35**, **Groundedness ≥ 0.85**, **Contradiction ≈ 0%**.
-* **Valutazione umana**: griglia 1–5 (Correttezza/Completezza/Chiarezza/Azione), 2 valutatori su 30–50 casi.
+* **EM/F1** for short answers; **ROUGE-L** for narrative ones.
+* **Groundedness & Faithfulness**: % of supported sentences, no-contradiction (NLI/regex), **attribution rate**.
+* Targets: **EM/F1 ≥ 0.6**, **ROUGE-L ≥ 0.35**, **Groundedness ≥ 0.85**, **Contradiction ≈ 0%**.
+* **Human eval**: grid 1–5 (Correctness/Completeness/Clarity/Actionability), 2 evaluators over 30–50 cases.
 
-### 4) Valutazione del merge KB ⊕ MEM
+### 4) KB ⊕ MEM merge evaluation
 
-* Confronta: (1) Solo KB, (2) KB⊕MEM cap 1, (3) KB⊕MEM cap 2 (+MMR).
-* Misura: **F1/ROUGE**, **Groundedness**, **tempo medio**; accetta variante che migliora qualità senza degradare troppo latenza (+10–20%).
+* Compare: (1) KB only, (2) KB⊕MEM cap 1, (3) KB⊕MEM cap 2 (+MMR).
+* Measure: **F1/ROUGE**, **Groundedness**, **average time**; accept variant improving quality without too much latency (+10–20%).
 
-### 5) Robustezza & regressioni
+### 5) Robustness & regressions
 
-* Test avversari (query vaghe/off-topic/typo) → output “no match” puliti.
-* Stabilità: ripeti query (stessa temperatura) e verifica varianza.
-* Script benchmark che genera **report CSV/HTML** a ogni modifica.
+* Adversarial tests (vague/off-topic/typo queries) → clean “no match” outputs.
+* Stability: repeat query (same temperature) and check variance.
+* Benchmark script generates **CSV/HTML report** after each change.
 
-### 6) Telemetria operativa (prod-like)
+### 6) Operational telemetry (prod-like)
 
-* Logging (opt-in): query, k, soglia, doc usati, distanza, latenza E2E, provider LLM/embeddings, thumbs up/down.
-* Dashboard (anche Streamlit): **hit@k** giornaliero, groundedness stimata, tempi medi, errori.
+* Logging (opt-in): query, k, threshold, docs used, distance, E2E latency, LLM/embedding provider, thumbs up/down.
+* Dashboard (even in Streamlit): **daily hit@k**, estimated groundedness, average times, errors.
 
-### 7) Criteri di accettazione (PoC → Go/NoGo)
+### 7) Acceptance criteria (PoC → Go/NoGo)
 
 * Retrieval: **Recall@5 ≥ 0.80**, **MRR@10 ≥ 0.6**.
-* Generazione: **Groundedness ≥ 0.85**, **Contradiction ≈ 0%**, **Human score ≥ 4/5**.
-* Operatività: **p95 latenza ≤ 4–6 s**, **error rate < 1%**.
-* Memoria: **Coverage MEM ≥ 30%**; nessuna memoria contraddittoria.
+* Generation: **Groundedness ≥ 0.85**, **Contradiction ≈ 0%**, **Human score ≥ 4/5**.
+* Operations: **p95 latency ≤ 4–6 s**, **error rate < 1%**.
+* Memory: **MEM Coverage ≥ 30%**; no contradictory memory.
 
 ---
 
-## Mini-howto (subito applicabile)
+## Mini-howto (immediately applicable)
 
 * **Gold set JSON**:
 
   ```json
   {
     "query_id": "Q123",
-    "query": "VoIP audio monodirezionale con SBC esterno",
-    "answer_gold": "Disabilita SIP ALG e apri range RTP.",
+    "query": "VoIP one-way audio with external SBC",
+    "answer_gold": "Disable SIP ALG and open RTP range.",
     "doc_gold": ["NETKB-3"],
     "mem_gold": []
   }
   ```
-* **Script eval (offline)**:
+* **Eval script (offline)**:
 
   1. embed → retrieve → Recall/Hit/MRR/nDCG
   2. prompt → LLM → EM/F1/ROUGE
   3. groundedness (overlap/NLI)
-  4. CSV con metriche + medie
-* **A/B**: flag CLI per embedder, soglia, top-k, cap MEM.
+  4. CSV with metrics + averages
+* **A/B**: CLI flag for embedder, threshold, top-k, MEM cap.
 
-**Consigli tattici**
+**Tactical tips**
 
-* **Chunking** ticket lunghi: 200–400 token + overlap 50 → miglior recall.
-* **Rerank** top-k (cosine + BM25 o MMR) → migliori MRR/nDCG.
-* **Prompt strutturato** (steps, prerequisiti, verifica) → più azionabilità.
-* **Soglie diverse per sorgente** (se aggiungi PDF): DOC leggermente più stretta.
+* **Chunking** long tickets: 200–400 tokens + 50 overlap → better recall.
+* **Rerank** top-k (cosine + BM25 or MMR) → better MRR/nDCG.
+* **Structured prompt** (steps, prerequisites, verification) → more actionable answers.
+* **Different thresholds per source** (if adding PDFs): slightly stricter DOC threshold.
 
 ---
 
-## Evoluzione UI
+## UI Evolution
 
-### A) Streamlit è “professionale” per un prodotto commerciale?
+### A) Is Streamlit “professional” for a commercial product?
 
-**Pro**: sviluppo rapido, ottimo per PoC/internal tools, deploy semplice, molti componenti pronti.
-**Contro**: multi-utenza/RBAC non nativi, UX avanzata più macchinosa, rerun frequenti, branding limitato.
-**Raccomandazione**: Streamlit va benissimo per **team interni/pilot**; per **SaaS/enterprise** valuta stack web classico (React/Next + FastAPI, SSO, worker di ingestion, RAG come servizio).
+**Pros**: fast development, great for PoC/internal tools, easy deploy, many ready-made components.
+**Cons**: no native multi-user/RBAC, complex UX harder, frequent reruns, limited branding.
+**Recommendation**: Streamlit is fine for **internal teams/pilots**; for **SaaS/enterprise** consider classic web stack (React/Next + FastAPI, SSO, async ingestion workers, RAG as a service).
 
-### B) Migliorare l’UI attuale restando su Streamlit
+### B) Improve current UI while staying on Streamlit
 
-* **Tabs**: “📥 Ingestion”, “🔎 Ricerca”, “🧠 Playbook”, “⚙️ Config”.
-* **Forms** per azioni batch; **expander** per opzioni avanzate; **status bar** con ambiente/provider/collection.
-* **Usabilità**: disabilita bottoni senza prerequisiti, toasts chiari, copy-to-clipboard, spinners utili.
-* **Stato & performance**: evita scritture a `session_state` dopo i widget; `cache_data` / `cache_resource`; forms per ridurre i rerun.
-* **Tabelle**: paginazione/filtri playbook; risultati simili con link cliccabili e expander MEM.
-* **Config & sicurezza**: sezioni chiare in sidebar; API key mascherata; esporta/ripristina preferenze.
-* **i18n**: valuta switch lingua se servono utenti non italiani.
-* **Migrazione product-grade**: segnali—SSO, routing complesso, ingestion async, integrazioni esterne.
+* **Tabs**: “📥 Ingestion”, “🔎 Search”, “🧠 Playbook”, “⚙️ Config”.
+* **Forms** for batch actions; **expanders** for advanced options; **status bar** with environment/provider/collection.
+* **Usability**: disable buttons without prerequisites, clear toasts, copy-to-clipboard, useful spinners.
+* **State & performance**: avoid `session_state` writes after widgets; `cache_data` / `cache_resource`; use forms to reduce reruns.
+* **Tables**: pagination/playbook filters; similar results with clickable links and MEM expander.
+* **Config & security**: clear sections in sidebar; masked API key; export/restore preferences.
+* **i18n**: consider language switch if non-Italian users.
+* **Product-grade migration**: signals—SSO, complex routing, async ingestion, external integrations.
 
 **TL;DR**
-Rimani su Streamlit per l’attuale target: aggiungi **tabs + forms + status bar**, rafforza cache/stato, rifinisci la tab **Playbook** (paginazione, delete singolo, expander). Prepara un **backend FastAPI** sottile per la logica RAG come step di transizione.
+Stay on Streamlit for current target: add **tabs + forms + status bar**, strengthen cache/state, refine **Playbook** tab (pagination, single delete, expander). Prepare a **thin FastAPI backend** for RAG logic as transition step.
