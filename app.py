@@ -30,6 +30,18 @@ import shutil, subprocess
 # === Sticky prefs (Livello A) ===
 import os
 
+# --- NumPy 2 compatibility shim (prima di importare chromadb) ---
+try:
+    import numpy as _np  # type: ignore
+    if not hasattr(_np, "float_"):  # NumPy 2.0+
+        _np.float_ = _np.float64     # type: ignore[attr-defined]
+    if not hasattr(_np, "int_"):
+        _np.int_ = _np.int64         # type: ignore[attr-defined]
+    if not hasattr(_np, "uint"):
+        _np.uint = _np.uint64        # type: ignore[attr-defined]
+except Exception:
+    pass
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def is_cloud() -> bool:
