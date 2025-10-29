@@ -208,3 +208,6 @@ __marimo__/
 
 # chromadb
 data/
+
+# prefs
+.app_prefs.json
