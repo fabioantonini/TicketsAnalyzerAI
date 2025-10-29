@@ -1,17 +1,17 @@
 # app.py
 """
-Streamlit RAG Support App (completa, con debug + self-tests + UI + Quit)
+Streamlit RAG Support App (complete, with debug + self-tests + UI + Quit)
 
-Funzionalità
-1) Connessione a YouTrack (URL + token) e lista progetti/issues
-2) Ingestione dei ticket in un Vector DB locale (Chroma) con embeddings locali o OpenAI
-3) Selezione LLM (OpenAI o locale via Ollama)
-4) Chat RAG: ricerca ticket simili + risposta LLM con citazioni ID
-5) Modalità CLI con self-tests quando Streamlit non è disponibile
-6) Pulsante Quit nella sidebar per chiudere l’app dal browser
-7) Se trova data/chroma/chroma.sqlite3, la collezione viene aperta automaticamente e mostrato il numero di documenti caricati (o “N/A” se non disponibile)
+Features
+1) YouTrack connection (URL + token) and project/issues list
+2) Ticket ingestion into a local Vector DB (Chroma) with local or OpenAI embeddings
+3) LLM selection (OpenAI or local via Ollama)
+4) RAG chat: search similar tickets + LLM answer with ID citations
+5) CLI mode with self-tests when Streamlit is not available
+6) Quit button in the sidebar to close the app from the browser
+7) If data/chroma/chroma.sqlite3 is found, the collection is opened automatically and the number of loaded documents is shown (or “N/A” if not available)
 
-Avvio consigliato
+Recommended start
 streamlit run app.py --server.port 8502
 """
 
@@ -27,10 +27,10 @@ from typing import List, Tuple, Optional
 import re
 import shutil, subprocess
 
-# === Sticky prefs (Livello A) ===
+# === Sticky prefs (Level A) ===
 import os
 
-# --- NumPy 2 compatibility shim (prima di importare chromadb) ---
+# --- NumPy 2 compatibility shim (before importing chromadb) ---
 try:
     import numpy as _np  # type: ignore
     if not hasattr(_np, "float_"):  # NumPy 2.0+
@@ -51,7 +51,7 @@ def is_cloud() -> bool:
             return True
     except Exception:
         pass
-    # fallback (heuristic): repo non scrivibile => trattala come cloud
+    # fallback (heuristic): repo not writable => treat it as cloud
     try:
         test_path = os.path.join(APP_DIR, ".write_test")
         with open(test_path, "w") as f:
@@ -67,7 +67,7 @@ def pick_default_chroma_dir() -> str:
     env_dir = os.getenv("CHROMA_DIR")
     if env_dir:
         return env_dir
-    # supporto anche a st.secrets["CHROMA_DIR"]
+    # also support st.secrets["CHROMA_DIR"]
     try:
         import streamlit as st  # type: ignore
         sec_dir = st.secrets.get("CHROMA_DIR") if hasattr(st, "secrets") else None
@@ -79,7 +79,7 @@ def pick_default_chroma_dir() -> str:
 
 DEFAULT_CHROMA_DIR = pick_default_chroma_dir()
 
-# Preferences path: scrivi su /tmp in cloud
+# Preferences path: write to /tmp in cloud
 PREFS_PATH = os.path.join("/tmp", ".app_prefs.json") if IS_CLOUD else os.path.join(APP_DIR, ".app_prefs.json")
 
 
@@ -129,18 +129,18 @@ def init_prefs_in_session():
 
 
 def one_line_preview(text: str, maxlen: int = 160) -> str:
-    """Rende il testo su una riga, rimuove bullet/extra spazi e tronca."""
+    """Make text single-line, remove bullets/extra spaces, and truncate."""
     if not text:
         return ""
     s = text.replace("\r", " ").replace("\n", " ")
     s = re.sub(r"\s+", " ", s).strip()
-    # rimuovi marker di lista a inizio testo (es. "- ", "* ", "• ")
+    # remove list marker at the beginning of the text (es. "- ", "* ", "• ")
     s = re.sub(r"^[-\*\u2022]\s+", "", s)
     return (s[:maxlen] + "…") if len(s) > maxlen else s
 
-# === Solution Memory (Livello B) ===
-MEM_COLLECTION = "memories"        # collection Chroma separata per i playbook
-DEFAULT_MEM_TTL_DAYS = 180         # scadenza consigliata per le memorie
+# === Solution Memory (Level B) ===
+MEM_COLLECTION = "memories"        # separate Chroma collection for playbooks
+DEFAULT_MEM_TTL_DAYS = 180         # recommended expiration for memories
 
 def now_ts() -> int:
     return int(time.time())
@@ -150,11 +150,11 @@ def ts_in_days(days: int) -> int:
 
 def is_ollama_available() -> tuple[bool, str]:
     """
-    Ritorna (available, host). Verifica via HTTP sull'host configurato
-    e, in fallback, la presenza del binario 'ollama'.
+    Return (available, host). Check via HTTP on configured host
+    and, as fallback, the presence of the 'ollama' binary.
     """
     host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    # Tentativo HTTP rapido
+    # Quick HTTP attempt
     try:
         import requests  # lazy import
         r = requests.get(f"{host}/api/tags", timeout=1)
@@ -162,7 +162,7 @@ def is_ollama_available() -> tuple[bool, str]:
             return True, host
     except Exception:
         pass
-    # Fallback: binario presente ed eseguibile
+    # Fallback: binary present and executable
     try:
         if shutil.which("ollama"):
             subprocess.run(
@@ -175,20 +175,20 @@ def is_ollama_available() -> tuple[bool, str]:
     return False, host
 
 # ------------------------------
-# Try imports con fallback/shim
+# Try imports with fallback/shim
 # ------------------------------
 try:
     import streamlit as st
     ST_AVAILABLE = True
-    print("[DEBUG] Streamlit importato.")
+    print("[DEBUG] Streamlit imported.")
 except Exception:
     ST_AVAILABLE = False
-    print("[DEBUG] Streamlit non disponibile, uso shim.")
+    print("[DEBUG] Streamlit not available, using shim.")
 
     class _STShim:
         def __getattr__(self, _name):
             def _noop(*_args, **_kwargs):
-                print(f"[DEBUG] Chiamata st.{_name} ignorata (shim).")
+                print(f"[DEBUG] Call st.{_name} ignorata (shim).")
                 return None
             return _noop
 
@@ -197,29 +197,29 @@ except Exception:
 try:
     import chromadb
     from chromadb.config import Settings as ChromaSettings
-    print("[DEBUG] chromadb importato.")
+    print("[DEBUG] chromadb imported.")
 except Exception:
     chromadb = None  # type: ignore
     ChromaSettings = None  # type: ignore
-    print("[DEBUG] chromadb non disponibile.")
+    print("[DEBUG] chromadb not available.")
 
 try:
     from sentence_transformers import SentenceTransformer
-    print("[DEBUG] sentence-transformers importato.")
+    print("[DEBUG] sentence-transformers imported.")
 except Exception:
     SentenceTransformer = None  # type: ignore
-    print("[DEBUG] sentence-transformers non disponibile.")
+    print("[DEBUG] sentence-transformers not available.")
 
 try:
     from openai import OpenAI
-    print("[DEBUG] openai SDK importato.")
+    print("[DEBUG] openai SDK imported.")
 except Exception:
     OpenAI = None  # type: ignore
-    print("[DEBUG] openai SDK non disponibile.")
+    print("[DEBUG] openai SDK not available.")
 
 
 # ------------------------------
-# Costanti
+# Constants
 # ------------------------------
 DEFAULT_COLLECTION = "tickets"
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
@@ -293,31 +293,31 @@ class EmbeddingBackend:
 
         if use_openai:
             if OpenAI is None:
-                raise RuntimeError("openai SDK non disponibile")
+                raise RuntimeError("openai SDK not available")
             api_key = get_openai_key()
             if not api_key:
-                raise RuntimeError("OPENAI_API_KEY non impostata (inseriscila nella sidebar o come env var)")
+                raise RuntimeError("OPENAI_API_KEY not set (enter it in the sidebar or as an environment variable)")
             self.client = OpenAI(api_key=api_key)
         else:
             if SentenceTransformer is None:
-                raise RuntimeError("sentence-transformers non disponibile")
+                raise RuntimeError("sentence-transformers non available")
             self.model = SentenceTransformer(model_name)
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        print(f"[DEBUG] embed {len(texts)} testi con provider={self.provider_name} modello={self.model_name}")
+        print(f"[DEBUG] embed {len(texts)} text with provider={self.provider_name} model={self.model_name}")
         if self.use_openai:
             res = self.client.embeddings.create(model=self.model_name, input=texts)
             return [d.embedding for d in res.data]  # type: ignore
         return self.model.encode(texts, normalize_embeddings=True).tolist()  # type: ignore
 
 def get_chroma_client(persist_dir: str):
-    """Crea la cartella e restituisce un PersistentClient Chroma."""
+    """Create folder and return a Chroma PersistentClient."""
     try:
-        import chromadb  # import lazy (niente globale)
+        import chromadb  # lazy import (no global)
         from chromadb.config import Settings as ChromaSettings
     except Exception as e:
-        # diagnostica esplicita
-        st.error("ChromaDB non importabile in questo ambiente.")
+        # explicit diagnostics
+        st.error("ChromaDB cannot be imported in this environment.")
         st.exception(e)
         raise
 
@@ -334,7 +334,7 @@ def get_chroma_client(persist_dir: str):
 class VectorStore:
     def __init__(self, persist_dir: str, collection_name: str):
         if chromadb is None:
-            raise RuntimeError("chromadb non disponibile")
+            raise RuntimeError("ChromaDB not available")
         self.persist_dir = persist_dir
         self.collection_name = collection_name
         os.makedirs(self.persist_dir, exist_ok=True)
@@ -345,7 +345,7 @@ class VectorStore:
         self.col = self.client.get_or_create_collection(name=collection_name, metadata={"hnsw:space": "cosine"})
 
     def add(self, ids: List[str], documents: List[str], metadatas: List[dict], embeddings: List[List[float]]):
-        print(f"[DEBUG] add {len(ids)} documenti a {self.collection_name}")
+        print(f"[DEBUG] add {len(ids)} documents to {self.collection_name}")
         self.col.add(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
 
     def query(self, query_embeddings: List[List[float]], n_results: int = 5) -> dict:
@@ -379,22 +379,22 @@ class LLMBackend:
         self.temperature = float(temperature)
         if provider == "OpenAI":
             if OpenAI is None:
-                raise RuntimeError("openai SDK non disponibile")
+                raise RuntimeError("openai SDK not available")
             api_key = get_openai_key()
             if not api_key:
-                raise RuntimeError("OPENAI_API_KEY non impostata (inseriscila nella sidebar o come env var)")
+                raise RuntimeError("OPENAI_API_KEY not set (enter it in the sidebar or as an environment variable)")
             self.client = OpenAI(api_key=api_key)
 
-        elif provider == "Ollama (locale)":
+        elif provider == "Ollama (local)":
             ok, host = is_ollama_available()
             if not ok:
-                raise RuntimeError("Ollama non è disponibile in questo ambiente: seleziona un provider OpenAI.")
-            # Nessun client SDK necessario: uso REST; salvo l’host per le chiamate
+                raise RuntimeError("Ollama is not available in this environment: select an OpenAI provider.")
+            # No SDK client needed: use REST; keep host for calls
             self.client = None
             self.ollama_host = host  # es. "http://localhost:11434"
 
         else:
-            raise RuntimeError("Provider LLM non supportato")
+            raise RuntimeError("Unsupported LLM provider")
 
     def generate(self, system: str, user: str) -> str:
         if self.provider == "OpenAI":
@@ -414,7 +414,7 @@ class LLMBackend:
                     temperature=self.temperature,
                 )
                 return chat.choices[0].message.content or ""
-        elif self.provider == "Ollama (locale)":
+        elif self.provider == "Ollama (local)":
             import requests
             host = getattr(self, "ollama_host", "http://localhost:11434").rstrip("/")
             url = f"{host}/api/chat"
@@ -471,29 +471,29 @@ class LLMBackend:
 
 
 RAG_SYSTEM_PROMPT = (
-    "Sei un assistente tecnico che risponde basandosi su ticket YouTrack simili. "
-    "Cita sempre gli ID dei ticket trovati tra parentesi quadre. Se il contesto non è sufficiente, chiedi chiarimenti."
+    "You are a technical assistant who answers based on similar YouTrack tickets. "
+    "Always cite the IDs of the tickets found in square brackets. If the context is insufficient, ask for clarifications. Use english in the answer"
 )
 
 def build_prompt(user_ticket: str, retrieved: List[Tuple[str, dict, float]]) -> str:
-    print(f"[DEBUG] build_prompt con {len(retrieved)} documenti recuperati")
+    print(f"[DEBUG] build_prompt with {len(retrieved)} retrieved documents")
     parts = [
-        "Nuovo ticket:\n" + user_ticket.strip(),
-        "\nTicket simili trovati (dal più vicino):",
+        "New ticket:\n" + user_ticket.strip(),
+        "\nSimilar tickets found (closest first):",
     ]
     for doc, meta, dist in retrieved:
         parts.append(
-            f"- {meta.get('id_readable','')} | distanza={dist:.3f} | {meta.get('summary','')}\n{doc[:500]}"
+            f"- {meta.get('id_readable','')} | distance={dist:.3f} | {meta.get('summary','')}\n{doc[:500]}"
         )
-    parts.append("\nRispondi con citazioni tra [ ] degli ID dei ticket rilevanti.")
+    parts.append("\nAnswer including citations in [ ] of the relevant ticket IDs. Please use always english in the answer")
     return "\n".join(parts)
 
 
 # ------------------------------
-# NEW: utility per aprire la collection in sessione
+# NEW: utility to open the collection into the session
 # ------------------------------
 def open_vector_in_session(persist_dir: str, collection_name: str):
-    """Apre (o crea) una collection Chroma e la mette in sessione."""
+    """Open (or create) a Chroma collection and put it into the session."""
     try:
         vs = VectorStore(persist_dir=persist_dir, collection_name=collection_name)
         cnt = vs.count()
@@ -516,7 +516,7 @@ def open_vector_in_session(persist_dir: str, collection_name: str):
 
 
 # ------------------------------
-# UI principale Streamlit
+# Main Streamlit UI
 # ------------------------------
 def run_streamlit_app():
     st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
@@ -524,37 +524,37 @@ def run_streamlit_app():
     prefs = st.session_state.get("prefs", {})
 
     st.title("YouTrack RAG Support")
-    st.caption("Gestione ticket di supporto basata su storico YouTrack + RAG + LLM")
+    st.caption("Support ticket management based on YouTrack history + RAG + LLM")
 
     with st.sidebar:
         quit_btn = False
-        st.header("Connessione YouTrack")
+        st.header("YouTrack Connection")
         yt_url = st.text_input("Server URL", value=prefs.get("yt_url", ""), placeholder="https://<org>.myjetbrains.com/youtrack")
         yt_token = st.text_input("Token (Bearer)", type="password")
-        connect = st.button("Connetti YouTrack")
+        connect = st.button("Connect YouTrack")
 
 
         st.markdown("---")
         st.header("Vector DB")
         persist_dir = st.text_input("Chroma path", value=prefs.get("persist_dir", DEFAULT_CHROMA_DIR), key="persist_dir")
-        # Patch 6: crea la dir e mostra il path attuale
+        # Patch 6: create the directory and show the current path
         os.makedirs(persist_dir, exist_ok=True)
-        st.caption(f"Chroma path attuale: {persist_dir}")
+        st.caption(f"Current Chroma path: {persist_dir}")
 
-        # Leggi le collections esistenti
+        # Read existing collections
         coll_options = []
         try:
             if chromadb is not None:
                 _client = get_chroma_client(persist_dir)
                 coll_options = [c.name for c in _client.list_collections()]  # type: ignore
         except Exception as e:
-            st.caption(f"Impossibile leggere le collections da '{persist_dir}': {e}")
+            st.caption(f"Unable to read collections from '{persist_dir}': {e}")
 
-        NEW_LABEL = "➕ Crea nuova collection..."
-        # Mantieni in sessione l'ultima scelta/nome nuova collection
+        NEW_LABEL = "➕ Create new collection..."
+        # Keep the last selected/new collection name in session
         prefs = st.session_state.get("prefs", {})
 
-        # Fallback: prima sessione → poi prefs → None
+        # Fallback: first session → then prefs → None
         last_sel = st.session_state.get("collection_selected")
         if not last_sel:
             last_sel = (prefs.get("collection_selected") or "").strip() or None
@@ -563,12 +563,12 @@ def run_streamlit_app():
         if not last_new:
             last_new = (prefs.get("new_collection_name") or DEFAULT_COLLECTION)
 
-        st.caption(f"Pref selezionata: {prefs.get('collection_selected', '—')}  ·  Path: {persist_dir}")
+        st.caption(f"Selected pref: {prefs.get('collection_selected', '—')}  ·  Path: {persist_dir}")
 
         if coll_options:
             opts = coll_options + [NEW_LABEL]
 
-            # Se esiste un'ultima selezione valida, usala; altrimenti predefinisci 0
+            # If a valid last selection exists, use it; otherwise default to 0
             if last_sel in opts:
                 default_index = opts.index(last_sel)
             elif DEFAULT_COLLECTION in opts:
@@ -579,123 +579,123 @@ def run_streamlit_app():
             sel = st.selectbox("Collection", options=opts, index=default_index, key="collection_select")
 
             if sel == NEW_LABEL:
-                new_name = st.text_input("Nome nuova Collection", value=last_new, key="new_collection_name")
+                new_name = st.text_input("New Collection name", value=last_new, key="new_collection_name")
                 collection_name = new_name.strip() or DEFAULT_COLLECTION
-                # Registra che stiamo creando una nuova collection
+                # Record that we are creating a new collection
                 st.session_state["collection_selected"] = NEW_LABEL
             else:
                 collection_name = sel
                 st.session_state["collection_selected"] = sel
-                st.session_state["new_collection_name"] = DEFAULT_COLLECTION  # reset opzionale
+                st.session_state["new_collection_name"] = DEFAULT_COLLECTION  # optional reset
         else:
-            st.caption("Nessuna collection trovata. Creane una nuova:")
+            st.caption("No collection found. Create a new one:")
             new_name = st.text_input("Nuova Collection", value=last_new, key="new_collection_name")
             collection_name = new_name.strip() or DEFAULT_COLLECTION
             st.session_state["collection_selected"] = NEW_LABEL
 
-        # --- Gestione collection: elimina ---
+        # --- Collection management: delete ---
         st.markdown("—")
-        st.subheader("Gestione collection")
+        st.subheader("Collection management")
         is_existing_collection = collection_name in coll_options
 
         del_confirm = st.checkbox(
-            f"Conferma eliminazione di '{collection_name}'",
+            f"Confirm deletion of '{collection_name}'",
             value=False,
             disabled=not is_existing_collection,
-            help="Questa operazione rimuove definitivamente la collection dal datastore."
+            help="This operation permanently removes the collection from the datastore."
         )
 
         if st.button(
-            "Elimina collection",
+            "Delete collection",
             type="secondary",
             disabled=not is_existing_collection,
-            help="Rimuove definitivamente la collection selezionata dal vector datastore."
+            help="Permanently removes the selected collection from the vector datastore."
         ):
             if not del_confirm:
-                st.warning("Spunta la casella di conferma per procedere con l'eliminazione.")
+                st.warning("Check the confirmation box to proceed with deletion.")
             else:
                 try:
                     _client = get_chroma_client(persist_dir)
                     _client.delete_collection(name=collection_name)
 
-                    # Rimuovi eventuale meta della collection (provider/modello)
+                    # Remove the collection meta (provider/model) if present
                     meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
                     try:
                         if os.path.exists(meta_path):
                             os.remove(meta_path)
                     except Exception:
-                        pass  # non bloccare l'UX se non riesci a cancellare il meta
+                        pass  # do not block the UX if meta deletion fails
 
-                    # Pulisci stato se puntava alla collection rimossa
+                    # Clean state if it was pointing to the removed collection
                     if st.session_state.get("vs_collection") == collection_name:
                         st.session_state["vector"] = None
                         st.session_state["vs_collection"] = None
                         st.session_state["vs_count"] = 0
-                        st.session_state["vs_persist_dir"] = persist_dir  # opzionale: mantieni il path corrente
+                        st.session_state["vs_persist_dir"] = persist_dir  # optional: keep the current path
 
-                    # Svuota eventuali risultati/issue caricati (opzionale ma consigliato)
+                    # Clear any loaded results/issues (optional but recommended)
                     st.session_state["issues"] = []
 
-                    # Rimuovi selezione e nome nuova dalla sessione
+                    # Remove selection and new name from session
                     st.session_state["collection_selected"] = None
                     st.session_state["new_collection_name"] = DEFAULT_COLLECTION
 
-                    # Aggiorna anche le sticky prefs, se presenti
+                    # Also update sticky prefs, if present
                     prefs = st.session_state.get("prefs", {})
                     prefs["collection_selected"] = None
                     prefs["new_collection_name"] = DEFAULT_COLLECTION
                     st.session_state["prefs"] = prefs
-                    # Se hai definito save_prefs(), aggiorna il file su disco (safe no-op se non c'è)
+                    # If save_prefs() is defined, update file on disk (safe no-op if absent)
                     try:
                         save_prefs(prefs)
                     except Exception:
                         pass
 
-                    st.success(f"Collection '{collection_name}' eliminata con successo.")
+                    st.success(f"Collection '{collection_name}' deleted successfully.")
                     st.rerun()
 
                 except Exception as e:
-                    st.error(f"Errore durante l'eliminazione: {e}")
+                    st.error(f"Error during deletion: {e}")
 
 
         st.markdown("---")
-        # --- [SIDEBAR > Embeddings] sostituisci il blocco attuale con questo ---
+        # --- [SIDEBAR > Embeddings] replace the current block with this ---
 
         st.header("Embeddings")
 
         emb_backends = ["OpenAI"]
         if SentenceTransformer is not None and not IS_CLOUD:
-            emb_backends.insert(0, "Locale (sentence-transformers)")
+            emb_backends.insert(0, "Local (sentence-transformers)")
 
         emb_backend = st.selectbox(
-            "Provider embeddings",
+            "Embeddings provider",
             emb_backends,
             index=0 if "OpenAI" in emb_backends else 0,
             key="emb_provider_select",
         )
 
-        # Reset del modello se cambia il provider
+        # Reset model if the provider changes
         prev_emb_backend = st.session_state.get("last_emb_backend")
         if prev_emb_backend != emb_backend:
             st.session_state["last_emb_backend"] = emb_backend
-            st.session_state["emb_model"] = "all-MiniLM-L6-v2" if emb_backend == "Locale (sentence-transformers)" else "text-embedding-3-small"
+            st.session_state["emb_model"] = "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
 
-        # Default iniziale: prefs solo al primo giro
+        # Initial default: prefs only on first run
         if "emb_model" not in st.session_state:
             st.session_state["emb_model"] = prefs.get(
                 "emb_model_name",
-                "all-MiniLM-L6-v2" if emb_backend == "Locale (sentence-transformers)" else "text-embedding-3-small"
+                "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
             )
 
-        # Opzioni in base al provider
-        emb_model_options = ["all-MiniLM-L6-v2"] if emb_backend == "Locale (sentence-transformers)" else ["text-embedding-3-small", "text-embedding-3-large"]
+        # Options depending on the provider
+        emb_model_options = ["all-MiniLM-L6-v2"] if emb_backend == "Local (sentence-transformers)" else ["text-embedding-3-small", "text-embedding-3-large"]
 
-        # Se il valore corrente non è tra le opzioni (p.es. dopo switch), riallinea
+        # If the current value is not among the options (e.g., after a switch), realign it
         if st.session_state["emb_model"] not in emb_model_options:
             st.session_state["emb_model"] = emb_model_options[0]
 
         emb_model_name = st.selectbox(
-            "Modello embeddings",
+            "Embeddings model",
             options=emb_model_options,
             index=emb_model_options.index(st.session_state["emb_model"]),
             key="emb_model"
@@ -704,31 +704,31 @@ def run_streamlit_app():
         st.header("Retrieval")
         if "max_distance" not in st.session_state:
             st.session_state["max_distance"] = float(prefs.get("max_distance", 0.9))
-        max_distance = st.slider("Soglia massima distanza (cosine)", 0.1, 2.0, st.session_state["max_distance"], 0.05)
+        max_distance = st.slider("Maximum distance threshold (cosine)", 0.1, 2.0, st.session_state["max_distance"], 0.05)
         st.session_state["max_distance"] = max_distance
 
         st.markdown("---")
         st.header("LLM")
 
-        # Rilevamento Ollama
+        # Ollama detection
         ollama_ok, ollama_host = (False, None) if IS_CLOUD else is_ollama_available()
-        llm_provider_options = ["OpenAI"] + (["Ollama (locale)"] if ollama_ok else [])
+        llm_provider_options = ["OpenAI"] + (["Ollama (local)"] if ollama_ok else [])
 
-        # Indice di default coerente con prefs ma sicuro se Ollama NON c'è
+        # Default index consistent with prefs but safe if Ollama is NOT available
         pref_provider = prefs.get("llm_provider", "OpenAI")
-        default_idx = 0 if (pref_provider != "Ollama (locale)" or not ollama_ok) else 1
+        default_idx = 0 if (pref_provider != "Ollama (local)" or not ollama_ok) else 1
 
         llm_provider = st.selectbox(
-            "Provider LLM",
+            "LLM provider",
             llm_provider_options,
             index=default_idx,
             key="llm_provider_select",
         )
 
         if not ollama_ok:
-            st.caption("⚠️ Ollama non è disponibile in questo ambiente; opzione disabilitata.")
+            st.caption("⚠️ Ollama is not available in this environment; option disabled.")
 
-        # Se cambia provider, resetta modello al default del provider selezionato
+        # If the provider changes, reset the model to the selected provider's default
         prev_provider = st.session_state.get("last_llm_provider")
         if prev_provider != llm_provider:
             st.session_state["last_llm_provider"] = llm_provider
@@ -736,7 +736,7 @@ def run_streamlit_app():
                 DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL
             )
 
-        # Default per provider + prefs (ignorando stringhe vuote)
+        # Default for provider + prefs (ignoring empty strings)
         llm_model_default = (DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
         pref_llm_model = (prefs.get("llm_model") or "").strip()
 
@@ -746,10 +746,10 @@ def run_streamlit_app():
             if not (st.session_state["llm_model"] or "").strip():
                 st.session_state["llm_model"] = llm_model_default
 
-        # Campo controllato via session_state
-        llm_model = st.text_input("Modello LLM", key="llm_model")
+        # Field controlled via session_state
+        llm_model = st.text_input("LLM model", key="llm_model")
 
-        # Slider temperatura (come in tuo codice)
+        # Temperature slider (as in your code)
         if "llm_temperature" not in st.session_state:
             st.session_state["llm_temperature"] = float(prefs.get("llm_temperature", 0.2))
         llm_temperature = st.slider("Temperature", 0.0, 1.5, st.session_state["llm_temperature"], 0.05)
@@ -764,42 +764,42 @@ def run_streamlit_app():
             type="password",
             value=st.session_state.get("openai_key", ""),
             disabled=not openai_needed,
-            help="Usata solo se scegli OpenAI come provider per Embeddings o LLM."
+            help="Used only if you choose OpenAI as provider for Embeddings or LLM."
         )
 
         if openai_key_input:
             st.session_state["openai_key"] = openai_key_input
 
         if not openai_needed:
-            st.caption("OpenAI API Key non necessaria: stai usando solo provider locali (Ollama / sentence-transformers).")
-        elif (llm_provider == "Ollama (locale)") and (emb_backend == "OpenAI"):
-            st.info("Stai usando: LLM = Ollama, Embeddings = OpenAI → la chiave verrà usata solo per gli embeddings.")
+            st.caption("OpenAI API Key not needed: you are using only local providers (Ollama / sentence-transformers).")
+        elif (llm_provider == "Ollama (local)") and (emb_backend == "OpenAI"):
+            st.info("You are using: LLM = Ollama, Embeddings = OpenAI → the key will be used only for embeddings.")
 
         st.markdown("---")
         st.header("Chat settings")
-        top_k = st.slider("Numero risultati (k)", min_value=1, max_value=20, value=3, step=1)
-        show_distances = st.checkbox("Mostra distanza nei risultati", value=True)
+        top_k = st.slider("Number of results (k)", min_value=1, max_value=20, value=3, step=1)
+        show_distances = st.checkbox("Show distance in results", value=True)
 
         st.header("Debug")
         if "show_prompt" not in st.session_state:
             st.session_state["show_prompt"] = bool(prefs.get("show_prompt", False))
-        show_prompt = st.checkbox("Mostra prompt LLM", value=st.session_state["show_prompt"])
+        show_prompt = st.checkbox("Show LLM prompt", value=st.session_state["show_prompt"])
         st.session_state["show_prompt"] = show_prompt
 
         st.markdown("---")
-        st.subheader("Preferenze")
-        prefs_enabled = st.checkbox("Abilita memoria preferenze (locale)", value=True, help="Salva impostazioni non sensibili in .app_prefs.json")
+        st.subheader("Preferences")
+        prefs_enabled = st.checkbox("Enable preferences memory (local)", value=True, help="Save non-sensitive settings in .app_prefs.json")
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("Salva preferenze"):
+            if st.button("Save preferences"):
                 if prefs_enabled:
-                    # --- Salva preferenze (versione coerente con disponibilità Ollama) ---
-                    # Coercizione provider: se Ollama non è disponibile, forza OpenAI
+                    # --- Save preferences (version consistent with Ollama availability) ---
+                    # Provider coercion: if Ollama is not available, force OpenAI
                     _provider_for_save = st.session_state.get("last_llm_provider", llm_provider)
-                    if not ollama_ok and _provider_for_save == "Ollama (locale)":
+                    if not ollama_ok and _provider_for_save == "Ollama (local)":
                         _provider_for_save = "OpenAI"
 
-                    # Modello LLM: mai vuoto e coerente col provider scelto
+                    # LLM model: never empty and consistent with the selected provider
                     _model_for_save = (st.session_state.get("llm_model") or "").strip()
                     if not _model_for_save:
                         _model_for_save = DEFAULT_LLM_MODEL if _provider_for_save == "OpenAI" else DEFAULT_OLLAMA_MODEL
@@ -809,8 +809,8 @@ def run_streamlit_app():
                         "persist_dir": persist_dir,
                         "emb_backend": st.session_state.get("last_emb_backend", emb_backend),
                         "emb_model_name": st.session_state.get("emb_model"),
-                        "llm_provider": _provider_for_save,       # <-- usa il provider coerente
-                        "llm_model": _model_for_save,             # <-- mai vuoto
+                        "llm_provider": _provider_for_save,       # <-- use the consistent provider
+                        "llm_model": _model_for_save,             # <-- never empty
                         "llm_temperature": st.session_state.get("llm_temperature", llm_temperature),
                         "max_distance": st.session_state.get("max_distance", max_distance),
                         "show_prompt": st.session_state.get("show_prompt", show_prompt),
@@ -818,37 +818,37 @@ def run_streamlit_app():
                         "new_collection_name": st.session_state.get("new_collection_name"),
                     })
                     st.session_state["prefs"] = load_prefs()
-                    st.success("Preferenze salvate.")
+                    st.success("Preferences salvate.")
                 else:
-                    st.info("Memoria preferenze disabilitata.")
+                    st.info("Preferences memory disabled.")
         with c2:
-            if st.button("Ripristina default"):
+            if st.button("Restore defaults"):
                 try:
                     if os.path.exists(PREFS_PATH):
                         os.remove(PREFS_PATH)
                     st.session_state["prefs"] = {}
-                    st.success("Preferenze ripristinate. Ricarica la pagina per vedere i default.")
+                    st.success("Preferences restored. Reload the page to see the defaults.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Errore nel ripristino: {e}")
+                    st.error(f"Error while restoring: {e}")
 
         st.markdown("---")
-        st.header("Memoria soluzioni (BETA)")
+        st.header("Solutions memory (BETA)")
 
         st.checkbox(
-            "Mostra testo completo dei playbook (MEM)",
+            "Show full text of playbooks (MEM)",
             key="mem_show_full",
-            help="Se attivo, sotto ogni risultato MEM compare un expander con l'intero playbook."
+            help="If enabled, an expander with the full playbook appears under each MEM result."
         )
         enable_memory = st.checkbox(
-            "Abilita memory 'playbook' (collection separata)",
+            "Enable 'playbook' memory (separate collection)",
             value=st.session_state.get("enable_memory", False),
-            help="Quando segni una risposta come 'Risolta', salvo un mini-playbook riutilizzabile."
+            help="When you mark an answer as 'Solved', I save a reusable mini-playbook."
         )
         st.session_state["enable_memory"] = enable_memory
 
         mem_ttl_days = st.number_input(
-            "TTL (giorni) per i playbook",
+            "TTL (days) for playbooks",
             min_value=7, max_value=365,
             value=st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS), step=1
         )
@@ -859,30 +859,30 @@ def run_streamlit_app():
             if st.session_state.pop("open_memories_after_save", False):
                 st.session_state["show_memories"] = True
             st.checkbox(
-                "Mostra playbook salvati",
+                "Show saved playbooks",
                 key="show_memories",
-                help="Visualizza l’elenco della collection 'memories' nella pagina principale."
+                help="Display the list of the 'memories' collection on the main page."
             )
         with c_mem2:
-            mem_del_confirm = st.checkbox("Conferma cancella memorie", value=False)
-            if st.button("Elimina tutte le memorie", disabled=not mem_del_confirm):
+            mem_del_confirm = st.checkbox("Confirm delete memories", value=False)
+            if st.button("Delete all memories", disabled=not mem_del_confirm):
                 try:
                     _client = get_chroma_client(persist_dir)
                     _client.delete_collection(name=MEM_COLLECTION)
                     _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
-                    st.success("Memorie eliminate.")
+                    st.success("Memories deleted.")
                 except Exception as e:
-                    st.error(f"Errore eliminazione memorie: {e}")
+                    st.error(f"Error deleting memories: {e}")
         st.markdown("---")
         if not IS_CLOUD:
             quit_btn = st.button("Quit", use_container_width=True)
             if quit_btn:
-                st.write("Chiusura applicazione...")
+                st.write("Closing application...")
                 os._exit(0)
-        st.caption(f"IS_CLOUD={IS_CLOUD} · Chroma dir={st.session_state['prefs'].get('persist_dir', DEFAULT_CHROMA_DIR)}")
+        st.caption(f"IS_CLOUD={IS_CLOUD} · ChromaDB dir={st.session_state['prefs'].get('persist_dir', DEFAULT_CHROMA_DIR)}")
 
-        # Apertura automatica della collection selezionata (senza dover re-indicizzare)
-        # Evita l'apertura se l'utente ha scelto "Crea nuova…" ma non ha digitato un nome diverso da default
+        # Automatic opening of the selected collection (without re-indexing)
+        # Avoid opening if the user has chosen "Create new…" but has not entered a name different from the default
         vector_ready = False
         if persist_dir and collection_name:
             changed = (
@@ -891,24 +891,24 @@ def run_streamlit_app():
                 or st.session_state.get("vector") is None
             )
 
-            # Non aprire se siamo su NEW_LABEL e il nome è vuoto (o solo default) e non esiste ancora
+            # Do not open if we are on NEW_LABEL and the name is empty (or only default) and does not yet exist
             if st.session_state.get("collection_selected") == NEW_LABEL and (collection_name == "" or (collection_name == DEFAULT_COLLECTION and collection_name not in coll_options)):
-                pass  # aspetta che l'utente clicchi "Indicizza" per creare la nuova collection
+                pass  # wait for the user to click "Index" to create the new collection
             else:
                 if changed:
                     ok, cnt, err = open_vector_in_session(persist_dir, collection_name)
                     vector_ready = ok
                     if ok:
-                        st.caption(f"Collection '{collection_name}' aperta. Documenti indicizzati: {cnt if cnt>=0 else 'N/A'}")
+                        st.caption(f"Collection '{collection_name}' opened. Indexed documents: {cnt if cnt>=0 else 'N/A'}")
                     else:
-                        st.caption(f"Non riesco ad aprire la collection: {err}")
+                        st.caption(f"Unable to open the collection: {err}")
                 else:
                     vector_ready = True
                     cnt = st.session_state.get("vs_count", -1)
-                    st.caption(f"Collection '{collection_name}' pronta. Documenti indicizzati: {cnt if cnt>=0 else 'N/A'}")
+                    st.caption(f"Collection '{collection_name}' ready. Indexed documents: {cnt if cnt>=0 else 'N/A'}")
 
         if quit_btn:
-            st.write("Chiusura applicazione...")
+            st.write("Closing application...")
             os._exit(0)
 
     # Session state init
@@ -926,64 +926,64 @@ def run_streamlit_app():
     # Connect to YouTrack
     if connect:
         if not yt_url or not yt_token:
-            st.error("Inserisci URL e Token di YouTrack")
+            st.error("Enter YouTrack URL and Token")
         else:
             try:
                 st.session_state["yt_client"] = YouTrackClient(yt_url, yt_token)
-                st.success("Connesso a YouTrack")
-                with st.spinner("Carico progetti..."):
+                st.success("Connected to YouTrack")
+                with st.spinner("Loading projects..."):
                     st.session_state["projects"] = st.session_state["yt_client"].list_projects()
             except Exception as e:
-                st.error(f"Connessione fallita: {e}")
+                st.error(f"Connection failed: {e}")
 
     # Projects & issues
 
-    st.subheader("Progetti YouTrack")
+    st.subheader("YouTrack Projects")
     if st.session_state.get("yt_client"):
         projects = st.session_state.get("projects", [])
         if projects:
             names = [f"{p.get('name')} ({p.get('shortName')})" for p in projects]
-            sel = st.selectbox("Scegli progetto", options=["-- seleziona --"] + names, key="proj_select")
+            sel = st.selectbox("Choose project", options=["-- select --"] + names, key="proj_select")
 
-            if sel and sel != "-- seleziona --":
+            if sel and sel != "-- select --":
                 p = projects[names.index(sel)]
                 project_key = p.get("shortName") or p.get("name")
 
-                # AUTO-LOAD: quando cambi progetto carico subito gli issue
+                # AUTO-LOAD: when the project changes, immediately load the issues
                 prev_key = st.session_state.get("last_project_key")
                 if prev_key != project_key:
                     try:
-                        with st.spinner("Carico issues..."):
+                        with st.spinner("Loading issues..."):
                             st.session_state["issues"] = st.session_state["yt_client"].list_issues(project_key)
                         st.session_state["last_project_key"] = project_key
-                        st.success(f"Caricati {len(st.session_state['issues'])} issues")
+                        st.success(f"Loaded {len(st.session_state['issues'])} issues")
                     except Exception as e:
-                        st.error(f"Errore caricamento issues: {e}")
+                        st.error(f"Error loading issues: {e}")
 
-                # opzionale: pulsante per ricaricare manualmente
-                if st.button("Ricarica issues"):
+                # optional: button to reload manually
+                if st.button("Reload issues"):
                     try:
-                        with st.spinner("Ricarico issues..."):
+                        with st.spinner("Reloading issues..."):
                             st.session_state["issues"] = st.session_state["yt_client"].list_issues(project_key)
-                        st.success(f"Caricati {len(st.session_state['issues'])} issues")
+                        st.success(f"Loaded {len(st.session_state['issues'])} issues")
                     except Exception as e:
-                        st.error(f"Errore ricaricamento: {e}")
+                        st.error(f"Reload error: {e}")
         else:
-            st.caption("Nessun progetto trovato (o permessi insufficienti).")
+            st.caption("No project found (or insufficient permissions).")
 
-    # Mostra SEMPRE la tabella se ci sono issue in memoria
+    # ALWAYS show the table if there are issues in memory
     issues = st.session_state.get("issues", [])
     if issues:
         base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
 
-        # Costruisci una tabella Markdown con ID cliccabile e senza Project/Apri
+        # Build a Markdown table with clickable ID and without Project/Open
         lines = []
         lines.append("| ID | Summary |")
         lines.append("|---|---|")
         for it in issues:
             url = f"{base_url}/issue/{it.id_readable}" if base_url else ""
             id_cell = f"[{it.id_readable}]({url})" if url else it.id_readable
-            # taglia summary lunghissime (facoltativo)
+            # trim very long summaries (optional)
             summary = it.summary.strip().replace("\n", " ")
             if len(summary) > 160:
                 summary = summary[:157] + "..."
@@ -991,11 +991,11 @@ def run_streamlit_app():
 
         st.markdown("\n".join(lines), unsafe_allow_html=False)
     else:
-        st.caption("Nessun issue in memoria. Seleziona un progetto per caricare i ticket.")
+        st.caption("No issues in memory. Select a project to load tickets.")
 
-    # Main: mostra la tabella solo se attivo
+    # Main: show the table only if active
     if st.session_state.get("show_memories"):
-        st.subheader("Playbook salvati (memories)")
+        st.subheader("Saved playbooks (memories)")
         try:
             _client = get_chroma_client(persist_dir)
             _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
@@ -1039,33 +1039,33 @@ def run_streamlit_app():
                         "ID": _id,
                         "Project": meta.get("project", ""),
                         "Tags": tags,
-                        "Creato": created_s,
-                        "Scade": expires_s,
-                        "Anteprima": prev,
+                        "Created": created_s,
+                        "Expires": expires_s,
+                        "Preview": prev,
                     })
 
                 st.dataframe(pd.DataFrame(rows), use_container_width=True)
         except Exception as e:
-            st.error(f"Errore lettura memorie: {e}")
+            st.error(f"Error reading memories: {e}")
 
     # Ingest
-    st.subheader("Indicizzazione Vector DB")
+    st.subheader("Vector DB Indexing")
     col1, col2 = st.columns([1, 3])
     with col1:
-        start_ingest = st.button("Indicizza ticket")
+        start_ingest = st.button("Index tickets")
     with col2:
-        st.caption("Crea embeddings dei ticket e li salva su Chroma per il retrieval semantico")
+        st.caption("Create ticket embeddings and save them to Chroma for semantic retrieval")
 
     if start_ingest:
         issues = st.session_state.get("issues", [])
         if not issues:
-            st.error("Prima carica i ticket del progetto")
+            st.error("First load the project's tickets")
         else:
             try:
                 st.session_state["vector"] = VectorStore(persist_dir=persist_dir, collection_name=collection_name)
                 use_openai_embeddings = (emb_backend == "OpenAI")
                 st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
-                # Salva meta modello embeddings per coerenza
+                # Save embeddings model metadata for consistency
                 try:
                     meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
                     meta = {"provider": st.session_state["embedder"].provider_name, "model": st.session_state["embedder"].model_name}
@@ -1077,31 +1077,31 @@ def run_streamlit_app():
                 ids = [it.id_readable for it in issues]
                 docs = [it.text_blob() for it in issues]
                 metas = [{"id_readable": it.id_readable, "summary": it.summary, "project": it.project} for it in issues]
-                with st.spinner("Calcolo embeddings e salvo su Chroma..."):
+                with st.spinner("Computing embeddings and saving to Chroma..."):
                     embs = st.session_state["embedder"].embed(
                         [f"{m['id_readable']} | {m['summary']}\n\n{d}" for d, m in zip(docs, metas)]
                     )
                     st.session_state["vector"].add(ids=ids, documents=docs, metadatas=metas, embeddings=embs)
-                # aggiorna contatore
+                # update counter
                 st.session_state["vs_persist_dir"] = persist_dir
                 st.session_state["vs_collection"] = collection_name
                 st.session_state["vs_count"] = st.session_state["vector"].count()
-                st.success(f"Indicizzazione completata. Totale documenti: {st.session_state['vs_count']}")
+                st.success(f"Indexing completed. Total documents: {st.session_state['vs_count']}")
             except Exception as e:
-                st.error(f"Errore indicizzazione: {e}")
+                st.error(f"Indexing error: {e}")
 
     # Chat
-    st.subheader("Chatbot RAG")
-    query = st.text_area("Nuovo ticket", height=140, placeholder="Descrivi il problema come faresti aprendo un ticket")
-    run_chat = st.button("Cerca e rispondi")
+    st.subheader("RAG Chatbot")
+    query = st.text_area("New ticket", height=140, placeholder="Describe the problem as if opening a ticket")
+    run_chat = st.button("Search and answer")
 
     if run_chat:
         if not query.strip():
-            st.error("Inserisci il testo del ticket")
+            st.error("Enter the ticket text")
         elif not st.session_state.get("vector"):
             ok, _, _ = open_vector_in_session(persist_dir, collection_name)
             if not ok:
-                st.error("Apri o crea una collection valida nella sidebar")
+                st.error("Open or create a valid collection in the sidebar")
         else:
             try:
                 if st.session_state.get("embedder") is None:
@@ -1111,7 +1111,7 @@ def run_streamlit_app():
                         model_name=emb_model_name
                     )
 
-                # Avvisa se il modello corrente differisce da quello usato per l'indicizzazione
+                # Warn if the current model differs from the one used for indexing
                 try:
                     meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
                     if os.path.exists(meta_path):
@@ -1120,8 +1120,8 @@ def run_streamlit_app():
                         if (m.get("provider") != st.session_state["embedder"].provider_name) or \
                         (m.get("model") != st.session_state["embedder"].model_name):
                             st.info(
-                                f"Nota: la collection è stata indicizzata con {m.get('provider')} / {m.get('model')}; "
-                                f"stai cercando con {st.session_state['embedder'].provider_name} / "
+                                f"Note: the collection was indexed with {m.get('provider')} / {m.get('model')}; "
+                                f"you are querying with {st.session_state['embedder'].provider_name} / "
                                 f"{st.session_state['embedder'].model_name}."
                             )
                 except Exception:
@@ -1143,7 +1143,7 @@ def run_streamlit_app():
                     if dist is not None and dist <= DIST_MAX_KB
                 ]
 
-                # 2) MEMORIES (se abilitato)
+                # 2) MEMORIES (if enabled)
                 mem_retrieved = []
                 if st.session_state.get("enable_memory", False):
                     try:
@@ -1166,9 +1166,9 @@ def run_streamlit_app():
                             if dist <= DIST_MAX_MEM:
                                 mem_retrieved.append((doc, meta, dist, "MEM"))
                     except Exception:
-                        pass  # la memoria è opzionale
+                        pass  # memory is optional
 
-                # 3) Fusione: max 2 mem, poi KB fino a top_k
+                # 3) Merge: max 2 mem, then KB up to top_k
                 mem_cap = 2
                 merged = sorted(mem_retrieved, key=lambda x: x[2])[:mem_cap] + \
                         sorted(kb_retrieved, key=lambda x: x[2])[:max(0, top_k - min(mem_cap, len(mem_retrieved)))]
@@ -1178,29 +1178,29 @@ def run_streamlit_app():
                     retrieved_for_prompt = [(doc, meta, dist) for (doc, meta, dist, _src) in merged]
                     prompt = build_prompt(query, retrieved_for_prompt)
                 else:
-                    prompt = f"Nuovo ticket:\n{query.strip()}\n\nNessun ticket simile è stato trovato nel knowledge base."
+                    prompt = f"New ticket:\n{query.strip()}\n\nNo similar ticket was found in the knowledge base."
 
                 if st.session_state.get("show_prompt", False):
-                    with st.expander("Prompt inviato al LLM", expanded=False):
+                    with st.expander("Prompt sent to the LLM", expanded=False):
                         st.code(prompt, language="markdown")
 
                 # LLM
                 _model = (llm_model or "").strip()
                 if not _model:
-                    raise RuntimeError("Modello LLM non impostato: seleziona un modello valido nella sidebar.")
+                    raise RuntimeError("LLM model not set: select a valid model in the sidebar.")
 
                 llm = LLMBackend(llm_provider, _model, temperature=llm_temperature)
-                with st.spinner("Genero risposta..."):
+                with st.spinner("Generating answer..."):
                     answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
                 st.write(answer)
-                # conserva l'ultimo Q/A per il salvataggio fuori da if run_chat
+                # store the last Q/A for saving outside the if run_chat
                 st.session_state["last_query"] = query
                 st.session_state["last_answer"] = answer
 
-                # 5) Risultati simili con provenienza
+                # 5) Similar results with provenance
                 if merged:
                     base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
-                    st.write("Risultati simili (top-k, con provenienza):")
+                    st.write("Similar results (top-k, with provenance):")
                     for (doc, meta, dist, src) in merged:
                         if src == "KB":
                             idr = meta.get("id_readable", "")
@@ -1209,51 +1209,51 @@ def run_streamlit_app():
 
                             if url:
                                 if show_distances:
-                                    st.markdown(f"- [KB] [{idr}]({url}) — distanza={dist:.3f} — {summary}")
+                                    st.markdown(f"- [KB] [{idr}]({url}) — distance={dist:.3f} — {summary}")
                                 else:
                                     st.markdown(f"- [KB] [{idr}]({url}) — {summary}")
                             else:
                                 if show_distances:
-                                    st.write(f"- [KB] {idr} — distanza={dist:.3f} — {summary}")
+                                    st.write(f"- [KB] {idr} — distance={dist:.3f} — {summary}")
                                 else:
                                     st.write(f"- [KB] {idr} — {summary}")
 
                         else:  # MEM
-                            # anteprima su una riga, niente bullet annidati
+                            # single-line preview, no nested bullets
                             preview = one_line_preview(doc, maxlen=160)
                             proj = meta.get("project", "")
                             raw_tags = meta.get("tags", "")
                             tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
                             extra = f" (tags: {tags})" if tags else (f" (proj: {proj})" if proj else "")
                             if show_distances:
-                                st.markdown(f"- [MEM]{extra} — distanza={dist:.3f} — {preview}")
+                                st.markdown(f"- [MEM]{extra} — distance={dist:.3f} — {preview}")
                             else:
                                 st.markdown(f"- [MEM]{extra} — {preview}")
 
-                            # Expander opzionale con il testo completo
+                            # Optional expander with full text
                             if st.session_state.get("mem_show_full", False):
-                                with st.expander("Playbook completo [MEM]", expanded=False):
-                                    # il playbook può contenere bullet markdown; renderizziamo come markdown
+                                with st.expander("Full playbook [MEM]", expanded=False):
+                                    # the playbook may contain markdown bullets; render as markdown
                                     st.markdown(doc)
 
                 else:
-                    st.caption("Nessun risultato sufficientemente simile (sotto soglia).")
+                    st.caption("No sufficiently similar result (below threshold).")
 
             except Exception as e:
-                st.error(f"Errore chat: {e}")
-    # --- Bottone persistente per salvare il playbook (fuori da if run_chat) ---
+                st.error(f"Chat error: {e}")
+    # --- Persistent button to save the playbook (outside the if run_chat) ---
     if st.session_state.get("enable_memory", False) and st.session_state.get("last_answer"):
         st.markdown("---")
-        if st.button("✅ Segna come risolto → Salva come playbook"):
+        if st.button("✅ Mark as solved → Save as playbook"):
             try:
                 query  = st.session_state.get("last_query", "") or ""
                 answer = st.session_state.get("last_answer", "") or ""
                 condense_prompt = (
-                    "Riassumi la soluzione in 3–6 frasi, imperative e riutilizzabili, evitando dati sensibili.\n"
+                    "Summarize the solution in 3–6 imperative, reusable sentences, avoiding sensitive data.\n"
                     f"- Query: {query.strip()}\n- Risposta:\n{answer}\n\n"
-                    "Output: elenco puntato di passi chiari."
+                    "Output: bulleted list of clear steps."
                 )
-                # usa il modello già validato in chat
+                # use the model already validated in chat
                 _model = (st.session_state.get("llm_model") or "").strip()
                 if not _model:
                     _model = DEFAULT_LLM_MODEL if st.session_state.get("last_llm_provider","OpenAI") == "OpenAI" else DEFAULT_OLLAMA_MODEL
@@ -1261,14 +1261,14 @@ def run_streamlit_app():
                 try:
                     llm_mem = LLMBackend(llm_provider, _model, temperature=max(0.1, llm_temperature - 0.1))
                     playbook_text = llm_mem.generate(
-                        "Sei un assistente che distilla mini-playbook riutilizzabili.",
+                        "You are an assistant who distills reusable mini-playbooks.",
                         condense_prompt
                     ).strip()
                 except Exception:
                     playbook_text = (answer[:800] + "…") if len(answer) > 800 else answer
 
                 if not playbook_text.strip():
-                    st.warning("Nessun contenuto da salvare.")
+                    st.warning("No content to save.")
                 else:
                     curr_proj = st.session_state.get("last_project_key") or ""
                     tags_list = ["playbook"] + ([curr_proj] if curr_proj else [])
@@ -1279,7 +1279,7 @@ def run_streamlit_app():
                         "quality": "verified",
                         "created_at": now_ts(),
                         "expires_at": ts_in_days(st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)),
-                        "tags": ",".join(tags_list),  # <-- CSV invece di lista
+                        "tags": ",".join(tags_list),  # <-- CSV instead of list
                     }
 
                     if st.session_state.get("embedder") is None:
@@ -1292,63 +1292,63 @@ def run_streamlit_app():
                     mem_id = f"mem::{uuid.uuid4().hex[:12]}"
                     _mem.add(ids=[mem_id], documents=[playbook_text], metadatas=[meta], embeddings=[mem_emb])
 
-                    st.caption(f"Salvato playbook in path='{persist_dir}', collection='{MEM_COLLECTION}'")
-                    st.success("Playbook salvato nella memoria.")
+                    st.caption(f"Saved playbook in path='{persist_dir}', collection='{MEM_COLLECTION}'")
+                    st.success("Playbook saved in memory.")
                     st.session_state["open_memories_after_save"] = True
-                    st.rerun()                                  # refresh tabella
+                    st.rerun()                                  # refresh table
             except Exception as e:
                 st.error(f"Errore salvataggio playbook: {e}")
 
 # ------------------------------
-# CLI + Self-tests (opzionali)
+# CLI + Self-tests (optional)
 # ------------------------------
 def _cli_help():
-    print("Uso: streamlit run app.py --server.port 8502")
+    print("Usage: streamlit run app.py --server.port 8502")
 
 def _self_tests():
-    print("Eseguo self-tests minimi...")
+    print("Running minimal self-tests...")
     vs = None
     try:
         vs = VectorStore(DEFAULT_CHROMA_DIR, DEFAULT_COLLECTION)
         print("VectorStore OK.")
     except Exception as e:
-        print(f"VectorStore non disponibile: {e}")
+        print(f"VectorStore not available: {e}")
 
     try:
         emb = EmbeddingBackend(use_openai=False, model_name=DEFAULT_EMBEDDING_MODEL)
         vec = emb.embed(["testo uno", "testo due"])
         assert len(vec) == 2 and isinstance(vec[0], list)
-        print("Embeddings locali OK.")
+        print("Local embeddings OK.")
     except Exception as e:
-        print(f"Embeddings locali non disponibili: {e}")
+        print(f"Local embeddings not available: {e}")
 
     try:
         llm = LLMBackend("OpenAI", DEFAULT_LLM_MODEL)
         assert isinstance(llm, LLMBackend)
         print("LLM OpenAI OK (init).")
     except Exception as e:
-        print(f"LLM OpenAI non disponibile: {e}")
+        print(f"LLM OpenAI not available: {e}")
 
     try:
-        llm = LLMBackend("Ollama (locale)", DEFAULT_OLLAMA_MODEL)
+        llm = LLMBackend("Ollama (local)", DEFAULT_OLLAMA_MODEL)
         assert isinstance(llm, LLMBackend)
         print("LLM Ollama OK (init).")
     except Exception as e:
-        print(f"LLM Ollama non disponibile: {e}")
+        print(f"LLM Ollama not available: {e}")
 
     try:
         llm = LLMBackend("???", "x")
     except Exception as e:
-        assert "Provider LLM non supportato" in str(e)
-    print("Tutti i self-tests sono PASSATI. ✅")
+        assert "Unsupported LLM provider" in str(e)
+    print("All self-tests PASSED. ✅")
 
 # ------------------------------
 # Main
 # ------------------------------
 if __name__ == "__main__":
-    print("[DEBUG] Avvio programma principale.")
+    print("[DEBUG] Starting main program.")
     if ST_AVAILABLE:
-        print("[DEBUG] Avvio interfaccia Streamlit.")
+        print("[DEBUG] Starting Streamlit interface.")
         run_streamlit_app()
     else:
         _cli_help()
