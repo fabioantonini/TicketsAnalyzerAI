@@ -803,6 +803,13 @@ def run_streamlit_app():
         with c_c:
             chunk_min = st.number_input("Min size to chunk", min_value=128, max_value=2048, value=512, step=64)
 
+        # NEW: toggle to enable/disable chunking at ingestion time
+        enable_chunking = st.checkbox(
+            "Enable chunking",
+            value=True,
+            help="Disable for short, self-contained tickets (index 1 document per ticket)."
+        )
+
         st.markdown("---")
         st.header("LLM")
 
@@ -1178,36 +1185,49 @@ def run_streamlit_app():
 
                 for it in issues:
                     full_text = it.text_blob()
-                    pieces = split_into_chunks(
-                        full_text,
-                        chunk_size=int(chunk_size),
-                        overlap=int(chunk_overlap),
-                        min_size=int(chunk_min),
-                    )
+                    if enable_chunking:
+                        pieces = split_into_chunks(
+                            full_text,
+                            chunk_size=int(chunk_size),
+                            overlap=int(chunk_overlap),
+                            min_size=int(chunk_min),
+                        )
+                    else:
+                        pieces = [(0, full_text)]
+
                     if not pieces:
                         pieces = [(0, full_text)]
+
+                    multi = len(pieces) > 1  # true se davvero abbiamo più chunk
+
                     for idx, (pos0, chunk_text) in enumerate(pieces, start=1):
-                        cid = f"{it.id_readable}::c{idx:03d}"
+                        # usa ID semplice se non stai spezzando
+                        cid = f"{it.id_readable}::c{idx:03d}" if multi else it.id_readable
+
                         all_ids.append(cid)
                         all_docs.append(chunk_text)
-                        all_metas.append({
+
+                        meta = {
                             "parent_id": it.id_readable,
-                            "chunk_id": idx,
-                            "pos": int(pos0),
                             "id_readable": it.id_readable,
                             "summary": it.summary,
                             "project": it.project,
-                        })
-                        embed_inputs.append(f"{it.id_readable} | {it.summary}\n\n{chunk_text}")
+                        }
+                        if multi:
+                            meta["chunk_id"] = idx          # int
+                            meta["pos"] = int(pos0)         # int
 
-                with st.spinner(f"Computing embeddings for {len(all_ids)} chunks and saving to Chroma..."):
+                        all_metas.append(meta)
+                        all_metas = [{k: v for k, v in m.items() if v is not None} for m in all_metas]
+                        embed_inputs.append(f"{it.id_readable} | {it.summary}\n\n{chunk_text}")
+                with st.spinner(f"Computing embeddings for {len(all_ids)} {'chunks' if enable_chunking else 'documents'} and saving to Chroma..."):
                     embs = st.session_state["embedder"].embed(embed_inputs)
                     st.session_state["vector"].add(ids=all_ids, documents=all_docs, metadatas=all_metas, embeddings=embs)
                 # update counter
                 st.session_state["vs_persist_dir"] = persist_dir
                 st.session_state["vs_collection"] = collection_name
                 st.session_state["vs_count"] = st.session_state["vector"].count()
-                st.success(f"Indexing completed. Total chunks: {st.session_state['vs_count']}")
+                st.success(f"Indexing completed. Total {'chunks' if enable_chunking else 'documents'}: {st.session_state['vs_count']}")
             except Exception as e:
                 st.error(f"Indexing error: {e}")
 
@@ -1340,7 +1360,7 @@ def run_streamlit_app():
 
                             cid = meta.get("chunk_id")
                             cpos = meta.get("pos")
-                            extra = f" · chunk {cid} @tok {cpos}" if cid else ""
+                            extra = f" · chunk {cid} @tok {cpos}" if cid else " · document"
                             if url:
                                 if show_distances:
                                     st.markdown(f"- [KB] [{idr}]({url}) — distance={dist:.3f}{extra} — {summary}")
