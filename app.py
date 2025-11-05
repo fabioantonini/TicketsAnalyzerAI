@@ -27,6 +27,13 @@ from typing import List, Tuple, Optional
 import re
 import shutil, subprocess
 
+# NEW (optional): token encoder for precise chunking
+try:
+    import tiktoken
+    _tk_enc = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    _tk_enc = None
+
 # === Sticky prefs (Level A) ===
 import os
 
@@ -137,6 +144,48 @@ def one_line_preview(text: str, maxlen: int = 160) -> str:
     # remove list marker at the beginning of the text (es. "- ", "* ", "• ")
     s = re.sub(r"^[-\*\u2022]\s+", "", s)
     return (s[:maxlen] + "…") if len(s) > maxlen else s
+
+# --- Chunking utilities (token-based, with tiktoken fallback) ---
+def _tokenize(text: str):
+    """
+    Returns tokens as ids if tiktoken is available, otherwise whitespace tokens.
+    """
+    if _tk_enc:
+        return _tk_enc.encode(text or "")
+    return re.findall(r"\S+", text or "")
+
+def _detokenize(toks):
+    if _tk_enc:
+        return _tk_enc.decode(toks)
+    return " ".join(map(str, toks))
+
+def split_into_chunks(text: str, chunk_size: int = 800, overlap: int = 80, min_size: int = 512):
+    """
+    Split very large descriptions into chunks with overlap.
+    Returns list of tuples: (start_token_pos, chunk_text).
+    If text is short (<= min_size), returns a single chunk with pos=0.
+    """
+    toks = _tokenize(text)
+    n = len(toks)
+    if n == 0:
+        return [(0, "")]
+    if n <= max(min_size, 2*chunk_size):
+        return [(0, text)]
+
+    chunks = []
+    start = 0
+    while start < n:
+        end = min(n, start + int(chunk_size))
+        # detokenize
+        if _tk_enc:
+            chunk_text = _tk_enc.decode(toks[start:end])
+        else:
+            chunk_text = " ".join(toks[start:end])
+        chunks.append((start, chunk_text))
+        if end >= n:
+            break
+        start = max(0, end - int(overlap))  # sliding window with overlap
+    return chunks
 
 # === Solution Memory (Level B) ===
 MEM_COLLECTION = "memories"        # separate Chroma collection for playbooks
@@ -489,6 +538,44 @@ def build_prompt(user_ticket: str, retrieved: List[Tuple[str, dict, float]]) -> 
     return "\n".join(parts)
 
 
+from collections import defaultdict
+
+def collapse_by_parent(results, per_parent=1, stitch_for_prompt=False, max_chars=1200):
+    """
+    Collapse multiple chunks from the same ticket into one row.
+    results: list of (doc, meta, dist, src)
+    - per_parent: keep at most N items per parent (1 for display)
+    - stitch_for_prompt: if True, concatenate selected chunks in order of 'pos' (bounded by max_chars)
+    Returns: list of (doc, meta, dist, src) sorted by distance.
+    """
+    groups = defaultdict(list)
+    for doc, meta, dist, src in results:
+        meta = meta or {}
+        pid = meta.get("parent_id") or meta.get("id_readable")
+        groups[pid].append((doc, meta, dist, src))
+
+    collapsed = []
+    for pid, items in groups.items():
+        items = sorted(items, key=lambda x: (x[2], x[1].get("pos", 0)))  # by distance, then pos
+        keep = items[:max(1, per_parent)]
+
+        if stitch_for_prompt and len(keep) > 1:
+            keep_sorted = sorted(keep, key=lambda x: x[1].get("pos", 0))
+            buf = []
+            total = 0
+            for d, _m, _dist, _src in keep_sorted:
+                if total + len(d) + 2 > max_chars:
+                    break
+                buf.append(d)
+                total += len(d) + 2
+            best = keep[0]  # best distance
+            stitched = "\n\n".join(buf) if buf else best[0]
+            collapsed.append((stitched, best[1], best[2], best[3]))
+        else:
+            collapsed.append(keep[0])
+
+    return sorted(collapsed, key=lambda x: x[2])
+
 # ------------------------------
 # NEW: utility to open the collection into the session
 # ------------------------------
@@ -663,34 +750,47 @@ def run_streamlit_app():
 
         st.header("Embeddings")
 
-        emb_backends = ["OpenAI"]
+        # Costruisci la lista in modo deterministico
+        emb_backends = []
         if SentenceTransformer is not None and not IS_CLOUD:
-            emb_backends.insert(0, "Local (sentence-transformers)")
+            emb_backends.append("Local (sentence-transformers)")
+        emb_backends.append("OpenAI")  # OpenAI c'è sempre in lista
 
+        # Backend preferito da prefs, con fallback robusto
+        pref_backend = (prefs.get("emb_backend") or "OpenAI")
+        if pref_backend == "Local (sentence-transformers)" and "Local (sentence-transformers)" not in emb_backends:
+            pref_backend = "OpenAI"
+
+        # Usa l'indice del backend preferito (non 0 fisso)
         emb_backend = st.selectbox(
             "Embeddings provider",
-            emb_backends,
-            index=0 if "OpenAI" in emb_backends else 0,
+            options=emb_backends,
+            index=emb_backends.index(pref_backend),
             key="emb_provider_select",
         )
 
-        # Reset model if the provider changes
+        # Reset modello se cambia provider
         prev_emb_backend = st.session_state.get("last_emb_backend")
         if prev_emb_backend != emb_backend:
             st.session_state["last_emb_backend"] = emb_backend
-            st.session_state["emb_model"] = "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
+            st.session_state["emb_model"] = (
+                "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
+            )
 
-        # Initial default: prefs only on first run
+        # Inizializza il modello UNA SOLA VOLTA leggendo le prefs
         if "emb_model" not in st.session_state:
             st.session_state["emb_model"] = prefs.get(
                 "emb_model_name",
                 "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
             )
 
-        # Options depending on the provider
-        emb_model_options = ["all-MiniLM-L6-v2"] if emb_backend == "Local (sentence-transformers)" else ["text-embedding-3-small", "text-embedding-3-large"]
+        # Opzioni per modello coerenti col provider corrente
+        emb_model_options = (
+            ["all-MiniLM-L6-v2"] if emb_backend == "Local (sentence-transformers)"
+            else ["text-embedding-3-small", "text-embedding-3-large"]
+        )
 
-        # If the current value is not among the options (e.g., after a switch), realign it
+        # Riallinea se il valore corrente non è nelle opzioni
         if st.session_state["emb_model"] not in emb_model_options:
             st.session_state["emb_model"] = emb_model_options[0]
 
@@ -700,12 +800,28 @@ def run_streamlit_app():
             index=emb_model_options.index(st.session_state["emb_model"]),
             key="emb_model"
         )
-        
+
         st.header("Retrieval")
         if "max_distance" not in st.session_state:
             st.session_state["max_distance"] = float(prefs.get("max_distance", 0.9))
         max_distance = st.slider("Maximum distance threshold (cosine)", 0.1, 2.0, st.session_state["max_distance"], 0.05)
         st.session_state["max_distance"] = max_distance
+
+        # NEW: Chunking params
+        c_a, c_b, c_c = st.columns(3)
+        with c_a:
+            chunk_size = st.number_input("Chunk size (tokens)", min_value=128, max_value=2048, value=800, step=64, help="512–800 suggested")
+        with c_b:
+            chunk_overlap = st.number_input("Overlap (tokens)", min_value=0, max_value=512, value=80, step=10)
+        with c_c:
+            chunk_min = st.number_input("Min size to chunk", min_value=128, max_value=2048, value=512, step=64)
+
+        # NEW: toggle to enable/disable chunking at ingestion time
+        enable_chunking = st.checkbox(
+            "Enable chunking",
+            value=False,
+            help="Disable for short, self-contained tickets (index 1 document per ticket)."
+        )
 
         st.markdown("---")
         st.header("LLM")
@@ -807,7 +923,7 @@ def run_streamlit_app():
                     save_prefs({
                         "yt_url": yt_url,
                         "persist_dir": persist_dir,
-                        "emb_backend": st.session_state.get("last_emb_backend", emb_backend),
+                        "emb_backend": emb_backend,
                         "emb_model_name": st.session_state.get("emb_model"),
                         "llm_provider": _provider_for_save,       # <-- use the consistent provider
                         "llm_model": _model_for_save,             # <-- never empty
@@ -1074,19 +1190,57 @@ def run_streamlit_app():
                 except Exception:
                     pass
 
-                ids = [it.id_readable for it in issues]
-                docs = [it.text_blob() for it in issues]
-                metas = [{"id_readable": it.id_readable, "summary": it.summary, "project": it.project} for it in issues]
-                with st.spinner("Computing embeddings and saving to Chroma..."):
-                    embs = st.session_state["embedder"].embed(
-                        [f"{m['id_readable']} | {m['summary']}\n\n{d}" for d, m in zip(docs, metas)]
-                    )
-                    st.session_state["vector"].add(ids=ids, documents=docs, metadatas=metas, embeddings=embs)
+                # NEW: chunked indexing with metadata parent_id, chunk_id, pos
+                all_ids = []
+                all_docs = []
+                all_metas = []
+                embed_inputs = []
+
+                for it in issues:
+                    full_text = it.text_blob()
+                    if enable_chunking:
+                        pieces = split_into_chunks(
+                            full_text,
+                            chunk_size=int(chunk_size),
+                            overlap=int(chunk_overlap),
+                            min_size=int(chunk_min),
+                        )
+                    else:
+                        pieces = [(0, full_text)]
+
+                    if not pieces:
+                        pieces = [(0, full_text)]
+
+                    multi = len(pieces) > 1  # true se davvero abbiamo più chunk
+
+                    for idx, (pos0, chunk_text) in enumerate(pieces, start=1):
+                        # usa ID semplice se non stai spezzando
+                        cid = f"{it.id_readable}::c{idx:03d}" if multi else it.id_readable
+
+                        all_ids.append(cid)
+                        all_docs.append(chunk_text)
+
+                        meta = {
+                            "parent_id": it.id_readable,
+                            "id_readable": it.id_readable,
+                            "summary": it.summary,
+                            "project": it.project,
+                        }
+                        if multi:
+                            meta["chunk_id"] = idx          # int
+                            meta["pos"] = int(pos0)         # int
+
+                        all_metas.append(meta)
+                        all_metas = [{k: v for k, v in m.items() if v is not None} for m in all_metas]
+                        embed_inputs.append(f"{it.id_readable} | {it.summary}\n\n{chunk_text}")
+                with st.spinner(f"Computing embeddings for {len(all_ids)} {'chunks' if enable_chunking else 'documents'} and saving to Chroma..."):
+                    embs = st.session_state["embedder"].embed(embed_inputs)
+                    st.session_state["vector"].add(ids=all_ids, documents=all_docs, metadatas=all_metas, embeddings=embs)
                 # update counter
                 st.session_state["vs_persist_dir"] = persist_dir
                 st.session_state["vs_collection"] = collection_name
                 st.session_state["vs_count"] = st.session_state["vector"].count()
-                st.success(f"Indexing completed. Total documents: {st.session_state['vs_count']}")
+                st.success(f"Indexing completed. Total {'chunks' if enable_chunking else 'documents'}: {st.session_state['vs_count']}")
             except Exception as e:
                 st.error(f"Indexing error: {e}")
 
@@ -1175,10 +1329,19 @@ def run_streamlit_app():
 
                 # 4) Prompt
                 if merged:
-                    retrieved_for_prompt = [(doc, meta, dist) for (doc, meta, dist, _src) in merged]
+                    # Collapse duplicates by ticket for DISPLAY (1 per parent)
+                    merged_collapsed_view = collapse_by_parent(merged, per_parent=1, stitch_for_prompt=False)
+
+                    # Collapse (up to 3 chunks per parent) and stitch for PROMPT context
+                    merged_for_prompt = collapse_by_parent(merged, per_parent=3, stitch_for_prompt=True, max_chars=1500)
+
+                    retrieved_for_prompt = [(doc, meta, dist) for (doc, meta, dist, _src) in merged_for_prompt]
                     prompt = build_prompt(query, retrieved_for_prompt)
                 else:
+                    merged_collapsed_view = []
                     prompt = f"New ticket:\n{query.strip()}\n\nNo similar ticket was found in the knowledge base."
+
+                st.write(f"DEBUG: view={len(merged_collapsed_view)}, prompt_ctx={len(merged_for_prompt) if merged else 0}")
 
                 if st.session_state.get("show_prompt", False):
                     with st.expander("Prompt sent to the LLM", expanded=False):
@@ -1201,22 +1364,26 @@ def run_streamlit_app():
                 if merged:
                     base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
                     st.write("Similar results (top-k, with provenance):")
-                    for (doc, meta, dist, src) in merged:
+                    for (doc, meta, dist, src) in merged_collapsed_view:
                         if src == "KB":
                             idr = meta.get("id_readable", "")
                             summary = meta.get("summary", "")
                             url = f"{base_url}/issue/{idr}" if base_url and idr else ""
 
+
+                            cid = meta.get("chunk_id")
+                            cpos = meta.get("pos")
+                            extra = f" · chunk {cid} @tok {cpos}" if cid else " · document"
                             if url:
                                 if show_distances:
-                                    st.markdown(f"- [KB] [{idr}]({url}) — distance={dist:.3f} — {summary}")
+                                    st.markdown(f"- [KB] [{idr}]({url}) — distance={dist:.3f}{extra} — {summary}")
                                 else:
-                                    st.markdown(f"- [KB] [{idr}]({url}) — {summary}")
+                                    st.markdown(f"- [KB] [{idr}]({url}){extra} — {summary}")
                             else:
                                 if show_distances:
-                                    st.write(f"- [KB] {idr} — distance={dist:.3f} — {summary}")
+                                    st.write(f"- [KB] {idr} — distance={dist:.3f}{extra} — {summary}")
                                 else:
-                                    st.write(f"- [KB] {idr} — {summary}")
+                                    st.write(f"- [KB] {idr}{extra} — {summary}")
 
                         else:  # MEM
                             # single-line preview, no nested bullets
