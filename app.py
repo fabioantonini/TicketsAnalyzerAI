@@ -750,34 +750,47 @@ def run_streamlit_app():
 
         st.header("Embeddings")
 
-        emb_backends = ["OpenAI"]
+        # Costruisci la lista in modo deterministico
+        emb_backends = []
         if SentenceTransformer is not None and not IS_CLOUD:
-            emb_backends.insert(0, "Local (sentence-transformers)")
+            emb_backends.append("Local (sentence-transformers)")
+        emb_backends.append("OpenAI")  # OpenAI c'è sempre in lista
 
+        # Backend preferito da prefs, con fallback robusto
+        pref_backend = (prefs.get("emb_backend") or "OpenAI")
+        if pref_backend == "Local (sentence-transformers)" and "Local (sentence-transformers)" not in emb_backends:
+            pref_backend = "OpenAI"
+
+        # Usa l'indice del backend preferito (non 0 fisso)
         emb_backend = st.selectbox(
             "Embeddings provider",
-            emb_backends,
-            index=0 if "OpenAI" in emb_backends else 0,
+            options=emb_backends,
+            index=emb_backends.index(pref_backend),
             key="emb_provider_select",
         )
 
-        # Reset model if the provider changes
+        # Reset modello se cambia provider
         prev_emb_backend = st.session_state.get("last_emb_backend")
         if prev_emb_backend != emb_backend:
             st.session_state["last_emb_backend"] = emb_backend
-            st.session_state["emb_model"] = "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
+            st.session_state["emb_model"] = (
+                "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
+            )
 
-        # Initial default: prefs only on first run
+        # Inizializza il modello UNA SOLA VOLTA leggendo le prefs
         if "emb_model" not in st.session_state:
             st.session_state["emb_model"] = prefs.get(
                 "emb_model_name",
                 "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
             )
 
-        # Options depending on the provider
-        emb_model_options = ["all-MiniLM-L6-v2"] if emb_backend == "Local (sentence-transformers)" else ["text-embedding-3-small", "text-embedding-3-large"]
+        # Opzioni per modello coerenti col provider corrente
+        emb_model_options = (
+            ["all-MiniLM-L6-v2"] if emb_backend == "Local (sentence-transformers)"
+            else ["text-embedding-3-small", "text-embedding-3-large"]
+        )
 
-        # If the current value is not among the options (e.g., after a switch), realign it
+        # Riallinea se il valore corrente non è nelle opzioni
         if st.session_state["emb_model"] not in emb_model_options:
             st.session_state["emb_model"] = emb_model_options[0]
 
@@ -787,7 +800,7 @@ def run_streamlit_app():
             index=emb_model_options.index(st.session_state["emb_model"]),
             key="emb_model"
         )
-        
+
         st.header("Retrieval")
         if "max_distance" not in st.session_state:
             st.session_state["max_distance"] = float(prefs.get("max_distance", 0.9))
@@ -806,7 +819,7 @@ def run_streamlit_app():
         # NEW: toggle to enable/disable chunking at ingestion time
         enable_chunking = st.checkbox(
             "Enable chunking",
-            value=True,
+            value=False,
             help="Disable for short, self-contained tickets (index 1 document per ticket)."
         )
 
@@ -910,7 +923,7 @@ def run_streamlit_app():
                     save_prefs({
                         "yt_url": yt_url,
                         "persist_dir": persist_dir,
-                        "emb_backend": st.session_state.get("last_emb_backend", emb_backend),
+                        "emb_backend": emb_backend,
                         "emb_model_name": st.session_state.get("emb_model"),
                         "llm_provider": _provider_for_save,       # <-- use the consistent provider
                         "llm_model": _model_for_save,             # <-- never empty
