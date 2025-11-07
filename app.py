@@ -611,9 +611,13 @@ def run_streamlit_app():
     prefs = st.session_state.get("prefs", {})
 
     # Init UI input key (separate from app state)
-        # Init UI input key (separate from app state)
     if "new_collection_name_input" not in st.session_state:
         st.session_state["new_collection_name_input"] = (prefs.get("new_collection_name") or DEFAULT_COLLECTION)
+
+    # Pre-reset (prima dei widget)
+    if st.session_state.get("after_delete_reset"):
+        st.session_state["new_collection_name_input"] = DEFAULT_COLLECTION
+        st.session_state["after_delete_reset"] = False
 
     st.title("YouTrack RAG Support")
     st.caption("Support ticket management based on YouTrack history + RAG + LLM")
@@ -679,8 +683,8 @@ def run_streamlit_app():
             sel = st.selectbox("Collection", options=opts, index=default_index, key="collection_select")
 
             if sel == NEW_LABEL:
-                new_name = st.text_input("New Collection name", value=last_new, key="new_collection_name_input")
-                collection_name = new_name.strip() or DEFAULT_COLLECTION
+                new_name = st.text_input("New Collection name", key="new_collection_name_input")
+                collection_name = (st.session_state["new_collection_name_input"] or "").strip() or DEFAULT_COLLECTION
                 # Record that we are creating a new collection
                 st.session_state["collection_selected"] = NEW_LABEL
             else:
@@ -689,8 +693,8 @@ def run_streamlit_app():
                 st.session_state["after_delete_reset"] = True  # optional reset
         else:
             st.caption("No collection found. Create a new one:")
-            new_name = st.text_input("Nuova Collection", value=last_new, key="new_collection_name_input")
-            collection_name = new_name.strip() or DEFAULT_COLLECTION
+            new_name = st.text_input("New Collection", value=last_new, key="new_collection_name_input")
+            collection_name = (st.session_state["new_collection_name_input"] or "").strip() or DEFAULT_COLLECTION
             st.session_state["collection_selected"] = NEW_LABEL
 
         # --- Collection management: delete ---
