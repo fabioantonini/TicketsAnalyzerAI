@@ -610,16 +610,32 @@ def run_streamlit_app():
     init_prefs_in_session()
     prefs = st.session_state.get("prefs", {})
 
+    # Init UI input key (separate from app state)
+        # Init UI input key (separate from app state)
+    if "new_collection_name_input" not in st.session_state:
+        st.session_state["new_collection_name_input"] = (prefs.get("new_collection_name") or DEFAULT_COLLECTION)
+
     st.title("YouTrack RAG Support")
     st.caption("Support ticket management based on YouTrack history + RAG + LLM")
 
     with st.sidebar:
         quit_btn = False
         st.header("YouTrack Connection")
-        yt_url = st.text_input("Server URL", value=prefs.get("yt_url", ""), placeholder="https://<org>.myjetbrains.com/youtrack")
+        # Pre-reset (must happen BEFORE widgets creation)
+        if st.session_state.get("after_delete_reset"):
+            st.session_state["new_collection_name_input"] = DEFAULT_COLLECTION
+            st.session_state["after_delete_reset"] = False
+
+        yt_url = st.text_input(
+            "Server URL",
+            value=prefs.get("yt_url", ""),
+            placeholder="https://<org>.myjetbrains.com/youtrack",
+        )
         yt_token = st.text_input("Token (Bearer)", type="password")
         connect = st.button("Connect YouTrack")
 
+        st.markdown("---")
+        st.header("Vector DB")
 
         st.markdown("---")
         st.header("Vector DB")
@@ -646,7 +662,7 @@ def run_streamlit_app():
         if not last_sel:
             last_sel = (prefs.get("collection_selected") or "").strip() or None
 
-        last_new = st.session_state.get("new_collection_name")
+        last_new = st.session_state.get("new_collection_name_input")
         if not last_new:
             last_new = (prefs.get("new_collection_name") or DEFAULT_COLLECTION)
 
@@ -666,17 +682,17 @@ def run_streamlit_app():
             sel = st.selectbox("Collection", options=opts, index=default_index, key="collection_select")
 
             if sel == NEW_LABEL:
-                new_name = st.text_input("New Collection name", value=last_new, key="new_collection_name")
+                new_name = st.text_input("New Collection name", value=last_new, key="new_collection_name_input")
                 collection_name = new_name.strip() or DEFAULT_COLLECTION
                 # Record that we are creating a new collection
                 st.session_state["collection_selected"] = NEW_LABEL
             else:
                 collection_name = sel
                 st.session_state["collection_selected"] = sel
-                st.session_state["new_collection_name"] = DEFAULT_COLLECTION  # optional reset
+                st.session_state["after_delete_reset"] = True  # optional reset
         else:
             st.caption("No collection found. Create a new one:")
-            new_name = st.text_input("Nuova Collection", value=last_new, key="new_collection_name")
+            new_name = st.text_input("Nuova Collection", value=last_new, key="new_collection_name_input")
             collection_name = new_name.strip() or DEFAULT_COLLECTION
             st.session_state["collection_selected"] = NEW_LABEL
 
@@ -725,7 +741,7 @@ def run_streamlit_app():
 
                     # Remove selection and new name from session
                     st.session_state["collection_selected"] = None
-                    st.session_state["new_collection_name"] = DEFAULT_COLLECTION
+                    st.session_state["after_delete_reset"] = True
 
                     # Also update sticky prefs, if present
                     prefs = st.session_state.get("prefs", {})
@@ -931,7 +947,7 @@ def run_streamlit_app():
                         "max_distance": st.session_state.get("max_distance", max_distance),
                         "show_prompt": st.session_state.get("show_prompt", show_prompt),
                         "collection_selected": st.session_state.get("collection_selected"),
-                        "new_collection_name": st.session_state.get("new_collection_name"),
+                        "new_collection_name": st.session_state.get("new_collection_name_input"),
                     })
                     st.session_state["prefs"] = load_prefs()
                     st.success("Preferences salvate.")
