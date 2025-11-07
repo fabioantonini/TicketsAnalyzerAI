@@ -636,9 +636,6 @@ def run_streamlit_app():
 
         st.markdown("---")
         st.header("Vector DB")
-
-        st.markdown("---")
-        st.header("Vector DB")
         persist_dir = st.text_input("Chroma path", value=prefs.get("persist_dir", DEFAULT_CHROMA_DIR), key="persist_dir")
         # Patch 6: create the directory and show the current path
         os.makedirs(persist_dir, exist_ok=True)
