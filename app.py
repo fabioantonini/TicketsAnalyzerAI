@@ -759,48 +759,76 @@ def run_streamlit_app():
             collection_name = (st.session_state["new_collection_name_input"] or "").strip() or DEFAULT_COLLECTION
             st.session_state["collection_selected"] = NEW_LABEL
 
+        # --- Advanced settings: pre-reset (prima di creare i widget) ---
+        if st.session_state.pop("_adv_do_reset", False):
+            _defaults = {
+                # Advanced
+                "adv_show_distances": False,
+                "adv_top_k": 5,
+                "adv_collapse_duplicates": True,
+                "adv_per_parent_display": 1,
+                "adv_per_parent_prompt": 3,
+                "adv_stitch_max_chars": 1500,
+                # Chunking
+                "enable_chunking": True,
+                "chunk_size": 800,
+                "chunk_overlap": 80,
+                "chunk_min": 512,
+            }
+            for _k, _v in _defaults.items():
+                st.session_state[_k] = _v
+            st.session_state["_adv_reset_toast"] = True
+
         # === Advanced settings ===
         with st.expander("Advanced settings", expanded=False):
-            # leggi valori correnti (prefs -> session -> default)
-            _prefs = st.session_state.get("prefs", {})
-
-            # Visibilità/Recall
-            show_distances = st.checkbox("Show distances in results",
-                value=bool(_prefs.get("show_distances", False)),
+            # Visibilità / Recall
+            show_distances = st.checkbox(
+                "Show distances in results",
                 key="adv_show_distances",
                 help="Mostra la distanza/score accanto a ciascun risultato."
             )
 
-            top_k = st.number_input("Top-K KB results",
-                min_value=1, max_value=50, value=int(_prefs.get("top_k", 5)),
-                step=1, key="adv_top_k",
+            top_k = st.number_input(
+                "Top-K KB results",
+                min_value=1, max_value=50, step=1,
+                key="adv_top_k",
                 help="Quanti risultati del Knowledge Base passare a valle (prima del collasso)."
             )
 
-            collapse_duplicates = st.checkbox("Collapse duplicate results by ticket",
-                value=bool(_prefs.get("collapse_duplicates", True)),
+            collapse_duplicates = st.checkbox(
+                "Collapse duplicate results by ticket",
                 key="adv_collapse_duplicates",
                 help="Mostra un solo risultato per ticket in UI (mantiene recall nel prompt)."
             )
 
             # Granularità per documento
-            per_parent_display = st.number_input("Max results per ticket (UI)",
-                min_value=1, max_value=10, value=int(_prefs.get("per_parent_display", 1)),
-                step=1, key="adv_per_parent_display",
+            per_parent_display = st.number_input(
+                "Max results per ticket (UI)",
+                min_value=1, max_value=10, step=1,
+                key="adv_per_parent_display",
                 help="Quanti risultati al massimo per lo stesso ticket nella lista visualizzata."
             )
 
-            per_parent_prompt = st.number_input("Max chunks per ticket (prompt)",
-                min_value=1, max_value=10, value=int(_prefs.get("per_parent_prompt", 3)),
-                step=1, key="adv_per_parent_prompt",
+            per_parent_prompt = st.number_input(
+                "Max chunks per ticket (prompt)",
+                min_value=1, max_value=10, step=1,
+                key="adv_per_parent_prompt",
                 help="Quanti chunk cucire per ticket nel contesto del prompt."
             )
 
-            stitch_max_chars = st.number_input("Stitched context limit (chars)",
-                min_value=200, max_value=20000, value=int(_prefs.get("stitch_max_chars", 1500)),
-                step=100, key="adv_stitch_max_chars",
+            stitch_max_chars = st.number_input(
+                "Stitched context limit (chars)",
+                min_value=200, max_value=20000, step=100,
+                key="adv_stitch_max_chars",
                 help="Limite di caratteri quando concateni più chunk dello stesso ticket per il prompt."
             )
+
+            if st.button("Reset to defaults", key="adv_reset_btn"):
+                st.session_state["_adv_do_reset"] = True
+                st.rerun()
+
+        if st.session_state.pop("_adv_reset_toast", False):
+            st.toast("Advanced settings reset to defaults", icon="↩️")
 
         # Rendi disponibili nel run corrente (se li usi in funzioni a valle)
         st.session_state["show_distances"] = st.session_state.get("adv_show_distances", False)
