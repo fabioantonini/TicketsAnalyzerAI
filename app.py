@@ -697,6 +697,63 @@ def run_streamlit_app():
             collection_name = (st.session_state["new_collection_name_input"] or "").strip() or DEFAULT_COLLECTION
             st.session_state["collection_selected"] = NEW_LABEL
 
+        # === Advanced settings ===
+        with st.expander("Advanced settings", expanded=False):
+            # leggi valori correnti (prefs -> session -> default)
+            _prefs = st.session_state.get("prefs", {})
+
+            # Visibilità/Recall
+            show_distances = st.checkbox(
+                "Show distances in results",
+                value=bool(_prefs.get("show_distances", False)),
+                key="adv_show_distances",
+                help="Mostra la distanza/score accanto a ciascun risultato."
+            )
+
+            top_k = st.number_input(
+                "Top-K KB results",
+                min_value=1, max_value=50, value=int(_prefs.get("top_k", 5)),
+                step=1, key="adv_top_k",
+                help="Quanti risultati del Knowledge Base passare a valle (prima del collasso)."
+            )
+
+            collapse_duplicates = st.checkbox(
+                "Collapse duplicate results by ticket",
+                value=bool(_prefs.get("collapse_duplicates", True)),
+                key="adv_collapse_duplicates",
+                help="Mostra un solo risultato per ticket in UI (mantiene recall nel prompt)."
+            )
+
+            # Granularità per documento
+            per_parent_display = st.number_input(
+                "Max results per ticket (UI)",
+                min_value=1, max_value=10, value=int(_prefs.get("per_parent_display", 1)),
+                step=1, key="adv_per_parent_display",
+                help="Quanti risultati al massimo per lo stesso ticket nella lista visualizzata."
+            )
+
+            per_parent_prompt = st.number_input(
+                "Max chunks per ticket (prompt)",
+                min_value=1, max_value=10, value=int(_prefs.get("per_parent_prompt", 3)),
+                step=1, key="adv_per_parent_prompt",
+                help="Quanti chunk cucire per ticket nel contesto del prompt."
+            )
+
+            stitch_max_chars = st.number_input(
+                "Stitched context limit (chars)",
+                min_value=200, max_value=20000, value=int(_prefs.get("stitch_max_chars", 1500)),
+                step=100, key="adv_stitch_max_chars",
+                help="Limite di caratteri quando concateni più chunk dello stesso ticket per il prompt."
+            )
+
+        # Rendi disponibili nel run corrente (se li usi in funzioni a valle)
+        st.session_state["show_distances"] = st.session_state.get("adv_show_distances", False)
+        st.session_state["top_k"] = int(st.session_state.get("adv_top_k", 5))
+        st.session_state["collapse_duplicates"] = st.session_state.get("adv_collapse_duplicates", True)
+        st.session_state["per_parent_display"] = int(st.session_state.get("adv_per_parent_display", 1))
+        st.session_state["per_parent_prompt"] = int(st.session_state.get("adv_per_parent_prompt", 3))
+        st.session_state["stitch_max_chars"] = int(st.session_state.get("adv_stitch_max_chars", 1500))
+
         # --- Collection management: delete ---
         st.markdown("—")
         st.subheader("Collection management")
@@ -910,8 +967,7 @@ def run_streamlit_app():
 
         st.markdown("---")
         st.header("Chat settings")
-        top_k = st.slider("Number of results (k)", min_value=1, max_value=20, value=3, step=1)
-        show_distances = st.checkbox("Show distance in results", value=True)
+        st.caption(f"Top-K = {st.session_state.get('top_k', 5)} · Show distances = {st.session_state.get('show_distances', False)}")
 
         st.header("Debug")
         if "show_prompt" not in st.session_state:
@@ -949,6 +1005,12 @@ def run_streamlit_app():
                         "show_prompt": st.session_state.get("show_prompt", show_prompt),
                         "collection_selected": st.session_state.get("collection_selected"),
                         "new_collection_name": st.session_state.get("new_collection_name_input"),
+                        "show_distances": st.session_state.get("adv_show_distances", False),
+                        "top_k": st.session_state.get("adv_top_k", 5),
+                        "collapse_duplicates": st.session_state.get("adv_collapse_duplicates", True),
+                        "per_parent_display": st.session_state.get("adv_per_parent_display", 1),
+                        "per_parent_prompt": st.session_state.get("adv_per_parent_prompt", 3),
+                        "stitch_max_chars": st.session_state.get("adv_stitch_max_chars", 1500),
                     })
                     st.session_state["prefs"] = load_prefs()
                     st.success("Preferences salvate.")
@@ -966,7 +1028,7 @@ def run_streamlit_app():
                     st.error(f"Error while restoring: {e}")
 
         st.markdown("---")
-        st.header("Solutions memory (BETA)")
+        st.header("Solutions memory")
 
         st.checkbox(
             "Show full text of playbooks (MEM)",
@@ -1302,6 +1364,8 @@ def run_streamlit_app():
                 q_emb = st.session_state["embedder"].embed([query])
 
                 # 1) KB
+                top_k = int(st.session_state.get("top_k", 5))
+                show_distances = bool(st.session_state.get("show_distances", False))
                 kb_res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=top_k)
                 kb_docs  = kb_res.get("documents", [[]])[0]
                 kb_metas = kb_res.get("metadatas", [[]])[0]
@@ -1345,18 +1409,46 @@ def run_streamlit_app():
                         sorted(kb_retrieved, key=lambda x: x[2])[:max(0, top_k - min(mem_cap, len(mem_retrieved)))]
 
                 # 4) Prompt
-                if merged:
-                    # Collapse duplicates by ticket for DISPLAY (1 per parent)
-                    merged_collapsed_view = collapse_by_parent(merged, per_parent=1, stitch_for_prompt=False)
 
-                    # Collapse (up to 3 chunks per parent) and stitch for PROMPT context
-                    merged_for_prompt = collapse_by_parent(merged, per_parent=3, stitch_for_prompt=True, max_chars=1500)
+                if merged:
+
+                    # Collapse duplicates by ticket for DISPLAY
+
+                    merged_collapsed_view = collapse_by_parent(
+
+                        merged,
+
+                        per_parent=int(st.session_state.get("per_parent_display", 1)),
+
+                        stitch_for_prompt=False,
+
+                    )
+
+
+                    # Collapse and stitch for PROMPT context
+
+                    merged_for_prompt = collapse_by_parent(
+
+                        merged,
+
+                        per_parent=int(st.session_state.get("per_parent_prompt", 3)),
+
+                        stitch_for_prompt=True,
+
+                        max_chars=int(st.session_state.get("stitch_max_chars", 1500)),
+
+                    )
+
 
                     retrieved_for_prompt = [(doc, meta, dist) for (doc, meta, dist, _src) in merged_for_prompt]
+
                     prompt = build_prompt(query, retrieved_for_prompt)
+
                 else:
+
                     merged_collapsed_view = []
-                    prompt = f"New ticket:\n{query.strip()}\n\nNo similar ticket was found in the knowledge base."
+
+                    prompt = f"New ticket:\n{{query.strip()}}\n\nNo similar ticket was found in the knowledge base."
 
                 st.write(f"DEBUG: view={len(merged_collapsed_view)}, prompt_ctx={len(merged_for_prompt) if merged else 0}")
 
@@ -1392,12 +1484,12 @@ def run_streamlit_app():
                             cpos = meta.get("pos")
                             extra = f" · chunk {cid} @tok {cpos}" if cid else " · document"
                             if url:
-                                if show_distances:
+                                if st.session_state.get("show_distances", False):
                                     st.markdown(f"- [KB] [{idr}]({url}) — distance={dist:.3f}{extra} — {summary}")
                                 else:
                                     st.markdown(f"- [KB] [{idr}]({url}){extra} — {summary}")
                             else:
-                                if show_distances:
+                                if st.session_state.get("show_distances", False):
                                     st.write(f"- [KB] {idr} — distance={dist:.3f}{extra} — {summary}")
                                 else:
                                     st.write(f"- [KB] {idr}{extra} — {summary}")
@@ -1409,7 +1501,7 @@ def run_streamlit_app():
                             raw_tags = meta.get("tags", "")
                             tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
                             extra = f" (tags: {tags})" if tags else (f" (proj: {proj})" if proj else "")
-                            if show_distances:
+                            if st.session_state.get("show_distances", False):
                                 st.markdown(f"- [MEM]{extra} — distance={dist:.3f} — {preview}")
                             else:
                                 st.markdown(f"- [MEM]{extra} — {preview}")
