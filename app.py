@@ -101,8 +101,7 @@ NON_SENSITIVE_PREF_KEYS = {
     "max_distance",
     "show_prompt",
     "collection_selected",
-    "new_collection_name",
-}
+    "new_collection_name", "enable_chunking", "chunk_size", "chunk_overlap", "chunk_min", "show_distances", "top_k", "collapse_duplicates", "per_parent_display", "per_parent_prompt", "stitch_max_chars"}
 
 def load_prefs() -> dict:
     try:
@@ -608,6 +607,70 @@ def open_vector_in_session(persist_dir: str, collection_name: str):
 def run_streamlit_app():
     st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
     init_prefs_in_session()
+        # === Robust prefs loading & one-time bootstrap ===
+    DEFAULT_PREFS = {
+        "yt_url": "",
+        "persist_dir": "",
+        "emb_backend": "OpenAI",
+        "emb_model_name": "text-embedding-3-small",
+        "llm_provider": "OpenAI",
+        "llm_model": "gpt-4o",
+        "llm_temperature": 0.2,
+        "max_distance": 0.9,
+        "show_prompt": True,
+        "collection_selected": None,
+        "new_collection_name": "tickets",
+
+        # chunking
+        "enable_chunking": True,
+        "chunk_size": 800,
+        "chunk_overlap": 80,
+        "chunk_min": 512,
+
+        # advanced settings
+        "show_distances": False,
+        "top_k": 5,
+        "collapse_duplicates": True,
+        "per_parent_display": 1,
+        "per_parent_prompt": 3,
+        "stitch_max_chars": 1500,
+    }
+
+    def _normalize(p: dict) -> dict:
+        p = p or {}
+        norm = DEFAULT_PREFS.copy()
+        norm.update(p)
+        return norm
+
+    # Bootstrap prefs -> session una sola volta
+    if not st.session_state.get("_prefs_bootstrapped", False):
+        prefs = _normalize(st.session_state.get("prefs", {}))
+
+        # Inizializza SOLO se mancanti (non sovrascrivere scelte dell'utente)
+        def _init(key, val):
+            if key not in st.session_state:
+                st.session_state[key] = val
+
+        # Chunking
+        _init("enable_chunking", prefs.get("enable_chunking"))
+        _init("chunk_size",       int(prefs.get("chunk_size", 800)))
+        _init("chunk_overlap",    int(prefs.get("chunk_overlap", 80)))
+        _init("chunk_min",        int(prefs.get("chunk_min", 512)))
+
+        # Advanced
+        _init("adv_show_distances",      prefs.get("show_distances"))
+        _init("adv_top_k",               int(prefs.get("top_k", 5)))
+        _init("adv_collapse_duplicates", prefs.get("collapse_duplicates"))
+        _init("adv_per_parent_display",  int(prefs.get("per_parent_display", 1)))
+        _init("adv_per_parent_prompt",   int(prefs.get("per_parent_prompt", 3)))
+        _init("adv_stitch_max_chars",    int(prefs.get("stitch_max_chars", 1500)))
+
+        # Nome nuova collection (solo se non c'è già)
+        _init("new_collection_name_input", (prefs.get("new_collection_name") or DEFAULT_COLLECTION))
+
+        st.session_state["_prefs_bootstrapped"] = True
+
+    # Ensure prefs is available beyond the bootstrap block
     prefs = st.session_state.get("prefs", {})
 
     # Init UI input key (separate from app state)
@@ -630,8 +693,7 @@ def run_streamlit_app():
             st.session_state["new_collection_name_input"] = DEFAULT_COLLECTION
             st.session_state["after_delete_reset"] = False
 
-        yt_url = st.text_input(
-            "Server URL",
+        yt_url = st.text_input("Server URL",
             value=prefs.get("yt_url", ""),
             placeholder="https://<org>.myjetbrains.com/youtrack",
         )
@@ -693,7 +755,7 @@ def run_streamlit_app():
                 st.session_state["after_delete_reset"] = True  # optional reset
         else:
             st.caption("No collection found. Create a new one:")
-            new_name = st.text_input("New Collection", value=last_new, key="new_collection_name_input")
+            new_name = st.text_input("New Collection", key="new_collection_name_input")
             collection_name = (st.session_state["new_collection_name_input"] or "").strip() or DEFAULT_COLLECTION
             st.session_state["collection_selected"] = NEW_LABEL
 
@@ -703,44 +765,38 @@ def run_streamlit_app():
             _prefs = st.session_state.get("prefs", {})
 
             # Visibilità/Recall
-            show_distances = st.checkbox(
-                "Show distances in results",
+            show_distances = st.checkbox("Show distances in results",
                 value=bool(_prefs.get("show_distances", False)),
                 key="adv_show_distances",
                 help="Mostra la distanza/score accanto a ciascun risultato."
             )
 
-            top_k = st.number_input(
-                "Top-K KB results",
+            top_k = st.number_input("Top-K KB results",
                 min_value=1, max_value=50, value=int(_prefs.get("top_k", 5)),
                 step=1, key="adv_top_k",
                 help="Quanti risultati del Knowledge Base passare a valle (prima del collasso)."
             )
 
-            collapse_duplicates = st.checkbox(
-                "Collapse duplicate results by ticket",
+            collapse_duplicates = st.checkbox("Collapse duplicate results by ticket",
                 value=bool(_prefs.get("collapse_duplicates", True)),
                 key="adv_collapse_duplicates",
                 help="Mostra un solo risultato per ticket in UI (mantiene recall nel prompt)."
             )
 
             # Granularità per documento
-            per_parent_display = st.number_input(
-                "Max results per ticket (UI)",
+            per_parent_display = st.number_input("Max results per ticket (UI)",
                 min_value=1, max_value=10, value=int(_prefs.get("per_parent_display", 1)),
                 step=1, key="adv_per_parent_display",
                 help="Quanti risultati al massimo per lo stesso ticket nella lista visualizzata."
             )
 
-            per_parent_prompt = st.number_input(
-                "Max chunks per ticket (prompt)",
+            per_parent_prompt = st.number_input("Max chunks per ticket (prompt)",
                 min_value=1, max_value=10, value=int(_prefs.get("per_parent_prompt", 3)),
                 step=1, key="adv_per_parent_prompt",
                 help="Quanti chunk cucire per ticket nel contesto del prompt."
             )
 
-            stitch_max_chars = st.number_input(
-                "Stitched context limit (chars)",
+            stitch_max_chars = st.number_input("Stitched context limit (chars)",
                 min_value=200, max_value=20000, value=int(_prefs.get("stitch_max_chars", 1500)),
                 step=100, key="adv_stitch_max_chars",
                 help="Limite di caratteri quando concateni più chunk dello stesso ticket per il prompt."
@@ -759,8 +815,7 @@ def run_streamlit_app():
         st.subheader("Collection management")
         is_existing_collection = collection_name in coll_options
 
-        del_confirm = st.checkbox(
-            f"Confirm deletion of '{collection_name}'",
+        del_confirm = st.checkbox(f"Confirm deletion of '{collection_name}'",
             value=False,
             disabled=not is_existing_collection,
             help="This operation permanently removes the collection from the datastore."
@@ -884,15 +939,14 @@ def run_streamlit_app():
         # NEW: Chunking params
         c_a, c_b, c_c = st.columns(3)
         with c_a:
-            chunk_size = st.number_input("Chunk size (tokens)", min_value=128, max_value=2048, value=800, step=64, help="512–800 suggested")
+            chunk_size = st.number_input("Chunk size (tokens)", min_value=128, max_value=2048, step=64, help="512–800 suggested", key="chunk_size")
         with c_b:
-            chunk_overlap = st.number_input("Overlap (tokens)", min_value=0, max_value=512, value=80, step=10)
+            chunk_overlap = st.number_input("Overlap (tokens)", min_value=0, max_value=512, step=10, key="chunk_overlap")
         with c_c:
-            chunk_min = st.number_input("Min size to chunk", min_value=128, max_value=2048, value=512, step=64)
+            chunk_min = st.number_input("Min size to chunk", min_value=128, max_value=2048, step=64, key="chunk_min")
 
         # NEW: toggle to enable/disable chunking at ingestion time
-        enable_chunking = st.checkbox(
-            "Enable chunking",
+        enable_chunking = st.checkbox("Enable chunking",
             value=False,
             help="Disable for short, self-contained tickets (index 1 document per ticket)."
         )
@@ -949,8 +1003,7 @@ def run_streamlit_app():
         st.header("API Keys")
         openai_needed = (emb_backend == "OpenAI") or (llm_provider == "OpenAI")
 
-        openai_key_input = st.text_input(
-            "OpenAI API Key",
+        openai_key_input = st.text_input("OpenAI API Key",
             type="password",
             value=st.session_state.get("openai_key", ""),
             disabled=not openai_needed,
@@ -982,40 +1035,81 @@ def run_streamlit_app():
         with c1:
             if st.button("Save preferences"):
                 if prefs_enabled:
-                    # --- Save preferences (version consistent with Ollama availability) ---
-                    # Provider coercion: if Ollama is not available, force OpenAI
-                    _provider_for_save = st.session_state.get("last_llm_provider", llm_provider)
-                    if not ollama_ok and _provider_for_save == "Ollama (local)":
-                        _provider_for_save = "OpenAI"
+                    try:
+                        # --- Provider coercion: if Ollama not available, force OpenAI ---
+                        _provider_for_save = st.session_state.get("last_llm_provider", llm_provider)
+                        if not ollama_ok and _provider_for_save == "Ollama (local)":
+                            _provider_for_save = "OpenAI"
 
-                    # LLM model: never empty and consistent with the selected provider
-                    _model_for_save = (st.session_state.get("llm_model") or "").strip()
-                    if not _model_for_save:
-                        _model_for_save = DEFAULT_LLM_MODEL if _provider_for_save == "OpenAI" else DEFAULT_OLLAMA_MODEL
+                        # --- LLM model: never empty and consistent with provider ---
+                        _model_for_save = (st.session_state.get("llm_model") or "").strip()
+                        if not _model_for_save:
+                            _model_for_save = DEFAULT_LLM_MODEL if _provider_for_save == "OpenAI" else DEFAULT_OLLAMA_MODEL
 
-                    save_prefs({
-                        "yt_url": yt_url,
-                        "persist_dir": persist_dir,
-                        "emb_backend": emb_backend,
-                        "emb_model_name": st.session_state.get("emb_model"),
-                        "llm_provider": _provider_for_save,       # <-- use the consistent provider
-                        "llm_model": _model_for_save,             # <-- never empty
-                        "llm_temperature": st.session_state.get("llm_temperature", llm_temperature),
-                        "max_distance": st.session_state.get("max_distance", max_distance),
-                        "show_prompt": st.session_state.get("show_prompt", show_prompt),
-                        "collection_selected": st.session_state.get("collection_selected"),
-                        "new_collection_name": st.session_state.get("new_collection_name_input"),
-                        "show_distances": st.session_state.get("adv_show_distances", False),
-                        "top_k": st.session_state.get("adv_top_k", 5),
-                        "collapse_duplicates": st.session_state.get("adv_collapse_duplicates", True),
-                        "per_parent_display": st.session_state.get("adv_per_parent_display", 1),
-                        "per_parent_prompt": st.session_state.get("adv_per_parent_prompt", 3),
-                        "stitch_max_chars": st.session_state.get("adv_stitch_max_chars", 1500),
-                    })
-                    st.session_state["prefs"] = load_prefs()
-                    st.success("Preferences salvate.")
+                        # --- Read current UI values or session defaults ---
+                        yt_url = st.session_state.get("yt_url", prefs.get("yt_url", ""))
+                        persist_dir = st.session_state.get("persist_dir", prefs.get("persist_dir", ""))
+
+                        emb_backend = st.session_state.get("emb_provider_select", prefs.get("emb_backend", "OpenAI"))
+                        emb_model_name = st.session_state.get("emb_model", prefs.get("emb_model_name", "text-embedding-3-small"))
+
+                        llm_temperature = st.session_state.get("llm_temperature", prefs.get("llm_temperature", 0.2))
+                        max_distance = st.session_state.get("max_distance", prefs.get("max_distance", 0.9))
+                        show_prompt = st.session_state.get("show_prompt", prefs.get("show_prompt", True))
+                        collection_selected = st.session_state.get("collection_selected", prefs.get("collection_selected"))
+                        new_collection_name = st.session_state.get("new_collection_name_input", prefs.get("new_collection_name", "tickets"))
+
+                        # --- Chunking ---
+                        enable_chunking = bool(st.session_state.get("enable_chunking", prefs.get("enable_chunking", True)))
+                        chunk_size = int(st.session_state.get("chunk_size", prefs.get("chunk_size", 800)))
+                        chunk_overlap = int(st.session_state.get("chunk_overlap", prefs.get("chunk_overlap", 80)))
+                        chunk_min = int(st.session_state.get("chunk_min", prefs.get("chunk_min", 512)))
+
+                        # --- Advanced settings ---
+                        show_distances = bool(st.session_state.get("adv_show_distances", prefs.get("show_distances", False)))
+                        top_k = int(st.session_state.get("adv_top_k", prefs.get("top_k", 5)))
+                        collapse_duplicates = bool(st.session_state.get("adv_collapse_duplicates", prefs.get("collapse_duplicates", True)))
+                        per_parent_display = int(st.session_state.get("adv_per_parent_display", prefs.get("per_parent_display", 1)))
+                        per_parent_prompt = int(st.session_state.get("adv_per_parent_prompt", prefs.get("per_parent_prompt", 3)))
+                        stitch_max_chars = int(st.session_state.get("adv_stitch_max_chars", prefs.get("stitch_max_chars", 1500)))
+
+                        # --- Save all prefs ---
+                        new_prefs = {
+                            "yt_url": yt_url,
+                            "persist_dir": persist_dir,
+                            "emb_backend": emb_backend,
+                            "emb_model_name": emb_model_name,
+                            "llm_provider": _provider_for_save,
+                            "llm_model": _model_for_save,
+                            "llm_temperature": llm_temperature,
+                            "max_distance": max_distance,
+                            "show_prompt": show_prompt,
+                            "collection_selected": collection_selected,
+                            "new_collection_name": new_collection_name,
+                            "enable_chunking": enable_chunking,
+                            "chunk_size": chunk_size,
+                            "chunk_overlap": chunk_overlap,
+                            "chunk_min": chunk_min,
+                            "show_distances": show_distances,
+                            "top_k": top_k,
+                            "collapse_duplicates": collapse_duplicates,
+                            "per_parent_display": per_parent_display,
+                            "per_parent_prompt": per_parent_prompt,
+                            "stitch_max_chars": stitch_max_chars,
+                        }
+
+                        save_prefs(new_prefs)
+                        st.session_state["prefs"] = load_prefs()
+                        st.success("Preferences salvate.")
+                        st.toast("Saved to .app_prefs.json", icon="✅")
+
+                    except Exception as e:
+                        import traceback, textwrap
+                        st.error(f"Errore durante il salvataggio: {e}")
+                        st.code(textwrap.dedent(traceback.format_exc()))
                 else:
                     st.info("Preferences memory disabled.")
+
         with c2:
             if st.button("Restore defaults"):
                 try:
@@ -1030,20 +1124,17 @@ def run_streamlit_app():
         st.markdown("---")
         st.header("Solutions memory")
 
-        st.checkbox(
-            "Show full text of playbooks (MEM)",
+        st.checkbox("Show full text of playbooks (MEM)",
             key="mem_show_full",
             help="If enabled, an expander with the full playbook appears under each MEM result."
         )
-        enable_memory = st.checkbox(
-            "Enable 'playbook' memory (separate collection)",
+        enable_memory = st.checkbox("Enable 'playbook' memory (separate collection)",
             value=st.session_state.get("enable_memory", False),
             help="When you mark an answer as 'Solved', I save a reusable mini-playbook."
         )
         st.session_state["enable_memory"] = enable_memory
 
-        mem_ttl_days = st.number_input(
-            "TTL (days) for playbooks",
+        mem_ttl_days = st.number_input("TTL (days) for playbooks",
             min_value=7, max_value=365,
             value=st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS), step=1
         )
@@ -1053,8 +1144,7 @@ def run_streamlit_app():
         with c_mem1:
             if st.session_state.pop("open_memories_after_save", False):
                 st.session_state["show_memories"] = True
-            st.checkbox(
-                "Show saved playbooks",
+            st.checkbox("Show saved playbooks",
                 key="show_memories",
                 help="Display the list of the 'memories' collection on the main page."
             )
