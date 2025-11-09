@@ -1046,9 +1046,59 @@ def run_streamlit_app():
         elif (llm_provider == "Ollama (local)") and (emb_backend == "OpenAI"):
             st.info("You are using: LLM = Ollama, Embeddings = OpenAI → the key will be used only for embeddings.")
 
+        # --- Retrieval summary (read-only) ---
         st.markdown("---")
-        st.header("Chat settings")
-        st.caption(f"Top-K = {st.session_state.get('top_k', 5)} · Show distances = {st.session_state.get('show_distances', False)}")
+        st.header("Retrieval summary")
+
+        def _yes(v: bool) -> str:
+            return "✅" if bool(v) else "✖️"
+
+        # Gather values from session/prefs
+        _top_k   = int(st.session_state.get("top_k", 5))
+        _maxdist = float(st.session_state.get("max_distance", 0.9))
+        _collapse = bool(st.session_state.get("collapse_duplicates", True))
+        _pp_ui   = int(st.session_state.get("per_parent_display", 1))
+        _pp_pr   = int(st.session_state.get("per_parent_prompt", 3))
+        _stitch  = int(st.session_state.get("stitch_max_chars", 1500))
+
+        _chunk_on = bool(st.session_state.get("enable_chunking", True))
+        _csize    = int(st.session_state.get("chunk_size", 800))
+        _coverlap = int(st.session_state.get("chunk_overlap", 80))
+        _cmin     = int(st.session_state.get("chunk_min", 512))
+
+        _emb_backend = st.session_state.get("emb_provider_select") or st.session_state.get("prefs", {}).get("emb_backend", "OpenAI")
+        _emb_model   = st.session_state.get("emb_model") or st.session_state.get("prefs", {}).get("emb_model_name", "text-embedding-3-small")
+
+        _collection  = (
+            st.session_state.get("collection_selected")
+            or st.session_state.get("new_collection_name_input")
+            or st.session_state.get("prefs", {}).get("new_collection_name")
+            or "—"
+        )
+
+        # Row 1: core retrieval knobs
+        c1, c2, c3 = st.columns(3)
+        with c1: st.caption("Top-K"); st.write(_top_k)
+        with c2: st.caption("Max distance"); st.write(f"{_maxdist:.2f}")
+        with c3: st.caption("Collapse duplicates"); st.write(_yes(_collapse))
+
+        # Row 2: per-ticket aggregation
+        c4, c5, c6 = st.columns(3)
+        with c4: st.caption("Per ticket (UI)"); st.write(_pp_ui)
+        with c5: st.caption("Per ticket (prompt)"); st.write(_pp_pr)
+        with c6: st.caption("Stitch limit (chars)"); st.write(_stitch)
+
+        # Row 3: chunking
+        c7, c8, c9, c10 = st.columns(4)
+        with c7: st.caption("Chunking enabled"); st.write(_yes(_chunk_on))
+        with c8: st.caption("Chunk size"); st.write(_csize)
+        with c9: st.caption("Overlap"); st.write(_coverlap)
+        with c10: st.caption("Min to chunk"); st.write(_cmin)
+
+        # Row 4: embeddings + collection
+        c11, c12 = st.columns(2)
+        with c11: st.caption("Embeddings"); st.write(f"{_emb_backend} · {_emb_model}")
+        with c12: st.caption("Collection"); st.write(_collection)
 
         st.header("Debug")
         if "show_prompt" not in st.session_state:
