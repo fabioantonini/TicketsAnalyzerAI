@@ -781,46 +781,46 @@ def run_streamlit_app():
 
         # === Advanced settings ===
         with st.expander("Advanced settings", expanded=False):
-            # Visibilità / Recall
+            # Visibility / Recall
             show_distances = st.checkbox(
                 "Show distances in results",
                 key="adv_show_distances",
-                help="Mostra la distanza/score accanto a ciascun risultato."
+                help="Display the distance/score next to each retrieved result."
             )
 
             top_k = st.number_input(
                 "Top-K KB results",
                 min_value=1, max_value=50, step=1,
                 key="adv_top_k",
-                help="Quanti risultati del Knowledge Base passare a valle (prima del collasso)."
+                help="Number of Knowledge Base results to pass downstream (before collapsing duplicates)."
             )
 
             collapse_duplicates = st.checkbox(
                 "Collapse duplicate results by ticket",
                 key="adv_collapse_duplicates",
-                help="Mostra un solo risultato per ticket in UI (mantiene recall nel prompt)."
+                help="Show only one result per ticket in the UI (keeps recall for the prompt context)."
             )
 
-            # Granularità per documento
+            # Per-document granularity
             per_parent_display = st.number_input(
                 "Max results per ticket (UI)",
                 min_value=1, max_value=10, step=1,
                 key="adv_per_parent_display",
-                help="Quanti risultati al massimo per lo stesso ticket nella lista visualizzata."
+                help="Maximum number of results displayed for the same ticket in the UI."
             )
 
             per_parent_prompt = st.number_input(
                 "Max chunks per ticket (prompt)",
                 min_value=1, max_value=10, step=1,
                 key="adv_per_parent_prompt",
-                help="Quanti chunk cucire per ticket nel contesto del prompt."
+                help="Maximum number of chunks concatenated per ticket in the prompt context."
             )
 
             stitch_max_chars = st.number_input(
                 "Stitched context limit (chars)",
                 min_value=200, max_value=20000, step=100,
                 key="adv_stitch_max_chars",
-                help="Limite di caratteri quando concateni più chunk dello stesso ticket per il prompt."
+                help="Character limit when concatenating multiple chunks of the same ticket for the prompt context."
             )
 
             if st.button("Reset to defaults", key="adv_reset_btn"):
@@ -830,7 +830,7 @@ def run_streamlit_app():
         if st.session_state.pop("_adv_reset_toast", False):
             st.toast("Advanced settings reset to defaults", icon="↩️")
 
-        # Rendi disponibili nel run corrente (se li usi in funzioni a valle)
+        # Make them available during the current run (for downstream functions)
         st.session_state["show_distances"] = st.session_state.get("adv_show_distances", False)
         st.session_state["top_k"] = int(st.session_state.get("adv_top_k", 5))
         st.session_state["collapse_duplicates"] = st.session_state.get("adv_collapse_duplicates", True)
@@ -907,18 +907,18 @@ def run_streamlit_app():
 
         st.header("Embeddings")
 
-        # Costruisci la lista in modo deterministico
+        # Build the list deterministically
         emb_backends = []
         if SentenceTransformer is not None and not IS_CLOUD:
             emb_backends.append("Local (sentence-transformers)")
-        emb_backends.append("OpenAI")  # OpenAI c'è sempre in lista
+        emb_backends.append("OpenAI")  # OpenAI is always available in the list
 
-        # Backend preferito da prefs, con fallback robusto
+        # Preferred backend from prefs, with robust fallback
         pref_backend = (prefs.get("emb_backend") or "OpenAI")
         if pref_backend == "Local (sentence-transformers)" and "Local (sentence-transformers)" not in emb_backends:
             pref_backend = "OpenAI"
 
-        # Usa l'indice del backend preferito (non 0 fisso)
+        # Use the index of the preferred backend (not hardcoded to 0)
         emb_backend = st.selectbox(
             "Embeddings provider",
             options=emb_backends,
@@ -926,7 +926,7 @@ def run_streamlit_app():
             key="emb_provider_select",
         )
 
-        # Reset modello se cambia provider
+        # Reset model when provider changes
         prev_emb_backend = st.session_state.get("last_emb_backend")
         if prev_emb_backend != emb_backend:
             st.session_state["last_emb_backend"] = emb_backend
@@ -934,20 +934,20 @@ def run_streamlit_app():
                 "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
             )
 
-        # Inizializza il modello UNA SOLA VOLTA leggendo le prefs
+        # Initialize the model ONLY ONCE using prefs
         if "emb_model" not in st.session_state:
             st.session_state["emb_model"] = prefs.get(
                 "emb_model_name",
                 "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
             )
 
-        # Opzioni per modello coerenti col provider corrente
+        # Model options consistent with the current provider
         emb_model_options = (
             ["all-MiniLM-L6-v2"] if emb_backend == "Local (sentence-transformers)"
             else ["text-embedding-3-small", "text-embedding-3-large"]
         )
 
-        # Riallinea se il valore corrente non è nelle opzioni
+        # Realign if the current value is not in the valid options
         if st.session_state["emb_model"] not in emb_model_options:
             st.session_state["emb_model"] = emb_model_options[0]
 
