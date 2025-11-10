@@ -222,6 +222,47 @@ def is_ollama_available() -> tuple[bool, str]:
         pass
     return False, host
 
+def _normalize_provider_label(p: str) -> str:
+    p = (p or "").strip().lower()
+    if "openai" in p:
+        return "openai"
+    if "sentence" in p:  # "Local (sentence-transformers)"
+        return "sentence-transformers"
+    return p or "unknown"
+
+def get_index_embedder_info(persist_dir: str, collection_name: str):
+    """
+    Ritorna (provider, model, source) dove source ∈ {"file","chroma",None}.
+    1) Tenta <persist_dir>/<collection_name>__meta.json con chiavi {"provider","model"}
+    2) Fallback: metadata della collection Chroma (se presenti)
+    """
+    # 1) file <collection>__meta.json
+    try:
+        meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+        if os.path.isfile(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                m = json.load(f)
+            prov = _normalize_provider_label(m.get("provider"))
+            model = (m.get("model") or "").strip()
+            if prov and model:
+                return prov, model, "file"
+    except Exception:
+        pass
+
+    # 2) metadata su Chroma (se salvati in fase di ingest)
+    try:
+        client = get_chroma_client(persist_dir)
+        coll = client.get_collection(collection_name)
+        md = (getattr(coll, "metadata", None) or {})  # alcune versioni mettono metadata qui
+        prov = _normalize_provider_label(md.get("provider"))
+        model = (md.get("model") or "").strip()
+        if prov and model:
+            return prov, model, "chroma"
+    except Exception:
+        pass
+
+    return None, None, None
+
 # ------------------------------
 # Try imports with fallback/shim
 # ------------------------------
@@ -1099,6 +1140,46 @@ def run_streamlit_app():
         c11, c12 = st.columns(2)
         with c11: st.caption("Embeddings"); st.write(f"{_emb_backend} · {_emb_model}")
         with c12: st.caption("Collection"); st.write(_collection)
+
+        # --- Embedding status (indexed vs query) ---
+        _collection = (
+            st.session_state.get("collection_selected")
+            or st.session_state.get("new_collection_name_input")
+            or st.session_state.get("prefs", {}).get("new_collection_name")
+        )
+
+        _persist_dir = st.session_state.get("persist_dir") or st.session_state.get("prefs", {}).get("persist_dir", "")
+
+        # Embedder scelto per la QUERY (UI corrente)
+        qry_provider = st.session_state.get("emb_provider_select") or st.session_state.get("prefs", {}).get("emb_backend", "OpenAI")
+        qry_model    = st.session_state.get("emb_model") or st.session_state.get("prefs", {}).get("emb_model_name", "text-embedding-3-small")
+
+        # Embedder con cui la COLLECTION è stata indicizzata (se noto)
+        idx_provider, idx_model, idx_src = (None, None, None)
+        if _collection and _persist_dir:
+            idx_provider, idx_model, idx_src = get_index_embedder_info(_persist_dir, _collection)
+
+        st.markdown("---")
+        st.header("Embedding status")
+
+        def _fmt(v): return v if v else "—"
+
+        colA, colB = st.columns(2)
+        with colA:
+            st.caption("Indexed with")
+            st.write(f"{_fmt(idx_provider)} · {_fmt(idx_model)}" + (f" ({idx_src})" if idx_src else ""))
+
+        with colB:
+            st.caption("Query using")
+            st.write(f"{_fmt(qry_provider)} · {_fmt(qry_model)}")
+
+        # Avviso mismatch (provider o modello diverso)
+        if idx_provider and idx_model:
+            mismatch = (_normalize_provider_label(qry_provider) != _normalize_provider_label(idx_provider)) or (qry_model.strip() != idx_model.strip())
+            if mismatch:
+                st.warning("Embedding mismatch between indexed collection and current query settings.", icon="⚠️")
+        else:
+            st.caption("No index metadata available. Consider reindexing to record provider/model.")
 
         st.header("Debug")
         if "show_prompt" not in st.session_state:
