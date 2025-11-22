@@ -1080,6 +1080,121 @@ def render_phase_retrieval_page(prefs):
         "filters similar tickets (Phase 6)."
     )
 
+def render_phase_llm_page(prefs):
+    import streamlit as st
+
+    # Normalizza prefs in dict per avere default decenti
+    if isinstance(prefs, dict):
+        prefs_dict = prefs
+    else:
+        prefs_dict = st.session_state.get("prefs", {})
+
+    st.title("Phase 4 – LLM & API keys")
+    st.write(
+        "Configure the LLM provider, model, temperature and API keys used to answer "
+        "questions based on the retrieved tickets."
+    )
+
+    # Piccolo riassunto in alto
+    current_provider = st.session_state.get(
+        "llm_provider_select",
+        prefs_dict.get("llm_provider", "OpenAI"),
+    )
+    current_model = st.session_state.get(
+        "llm_model",
+        prefs_dict.get("llm_model", "gpt-4o"),
+    )
+    current_temp = float(
+        st.session_state.get(
+            "llm_temperature",
+            prefs_dict.get("llm_temperature", 0.2),
+        )
+    )
+
+    st.info(
+        f"Current LLM: **{current_provider} · {current_model}** · "
+        f"Temperature: **{current_temp:.2f}**"
+    )
+
+    st.markdown("---")
+
+    st.header("LLM")
+
+    # Ollama detection
+    ollama_ok, ollama_host = (False, None) if IS_CLOUD else is_ollama_available()
+    llm_provider_options = ["OpenAI"] + (["Ollama (local)"] if ollama_ok else [])
+
+    # Default index consistent with prefs but safe if Ollama is NOT available
+    pref_provider = prefs_dict.get("llm_provider", "OpenAI")
+    default_idx = 0 if (pref_provider != "Ollama (local)" or not ollama_ok) else 1
+
+    llm_provider = st.selectbox(
+        "LLM provider",
+        llm_provider_options,
+        index=default_idx,
+        key="llm_provider_select",
+    )
+
+    if not ollama_ok:
+        st.caption("⚠️ Ollama is not available in this environment; option disabled.")
+
+    # If the provider changes, reset the model to the selected provider's default
+    prev_provider = st.session_state.get("last_llm_provider")
+    if prev_provider != llm_provider:
+        st.session_state["last_llm_provider"] = llm_provider
+        st.session_state["llm_model"] = (
+            DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL
+        )
+
+    # Default for provider + prefs (ignoring empty strings)
+    llm_model_default = (DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
+    pref_llm_model = (prefs_dict.get("llm_model") or "").strip()
+
+    if "llm_model" not in st.session_state:
+        st.session_state["llm_model"] = pref_llm_model or llm_model_default
+    else:
+        if not (st.session_state["llm_model"] or "").strip():
+            st.session_state["llm_model"] = llm_model_default
+
+    # Field controlled via session_state
+    llm_model = st.text_input("LLM model", key="llm_model")
+
+    # Temperature slider (as in your code)
+    if "llm_temperature" not in st.session_state:
+        st.session_state["llm_temperature"] = float(prefs_dict.get("llm_temperature", 0.2))
+    llm_temperature = st.slider("Temperature", 0.0, 1.5, st.session_state["llm_temperature"], 0.05)
+    st.session_state["llm_temperature"] = llm_temperature
+
+    # --- [SIDEBAR > API Keys] ---
+    st.header("API Keys")
+    # Read providers from session_state (fallback to defaults / prefs)
+    emb_backend = st.session_state.get(
+        "emb_provider_select",
+        prefs_dict.get("emb_backend", "OpenAI"),
+    )
+
+    llm_provider = st.session_state.get(
+        "llm_provider_select",
+        prefs_dict.get("llm_provider", "OpenAI"),
+    )
+
+    openai_needed = (emb_backend == "OpenAI") or (llm_provider == "OpenAI")
+
+    openai_key_input = st.text_input("OpenAI API Key",
+        type="password",
+        value=st.session_state.get("openai_key", ""),
+        disabled=not openai_needed,
+        help="Used only if you choose OpenAI as provider for Embeddings or LLM."
+    )
+
+    if openai_key_input:
+        st.session_state["openai_key"] = openai_key_input
+
+    if not openai_needed:
+        st.caption("OpenAI API Key not needed: you are using only local providers (Ollama / sentence-transformers).")
+    elif (llm_provider == "Ollama (local)") and (emb_backend == "OpenAI"):
+        st.info("You are using: LLM = Ollama, Embeddings = OpenAI → the key will be used only for embeddings.")
+
 # ------------------------------
 # Main Streamlit UI
 # ------------------------------
@@ -1181,6 +1296,10 @@ def run_streamlit_app():
     if phase == "Retrieval configuration":
         render_phase_retrieval_page(prefs)
 
+    # Phase 4 – LLM & API keys (page)
+    if phase == "LLM & API keys":
+        render_phase_llm_page(prefs)
+
     with st.sidebar:
         # --- Wizard-style navigation (visual only, all sections still visible) ---
         PHASES = [
@@ -1244,85 +1363,15 @@ def run_streamlit_app():
         st.caption(f"Embeddings: {emb_provider} · {emb_model or 'n/a'}")
 
         st.markdown("---")
+        st.markdown("### LLM status")
 
-        st.header("LLM")
+        llm_provider = st.session_state.get("llm_provider_select", "OpenAI")
+        llm_model = st.session_state.get("llm_model", "gpt-4o")
+        llm_temperature = float(st.session_state.get("llm_temperature", 0.2))
 
-        # Ollama detection
-        ollama_ok, ollama_host = (False, None) if IS_CLOUD else is_ollama_available()
-        llm_provider_options = ["OpenAI"] + (["Ollama (local)"] if ollama_ok else [])
-
-        # Default index consistent with prefs but safe if Ollama is NOT available
-        pref_provider = prefs.get("llm_provider", "OpenAI")
-        default_idx = 0 if (pref_provider != "Ollama (local)" or not ollama_ok) else 1
-
-        llm_provider = st.selectbox(
-            "LLM provider",
-            llm_provider_options,
-            index=default_idx,
-            key="llm_provider_select",
-        )
-
-        if not ollama_ok:
-            st.caption("⚠️ Ollama is not available in this environment; option disabled.")
-
-        # If the provider changes, reset the model to the selected provider's default
-        prev_provider = st.session_state.get("last_llm_provider")
-        if prev_provider != llm_provider:
-            st.session_state["last_llm_provider"] = llm_provider
-            st.session_state["llm_model"] = (
-                DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL
-            )
-
-        # Default for provider + prefs (ignoring empty strings)
-        llm_model_default = (DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
-        pref_llm_model = (prefs.get("llm_model") or "").strip()
-
-        if "llm_model" not in st.session_state:
-            st.session_state["llm_model"] = pref_llm_model or llm_model_default
-        else:
-            if not (st.session_state["llm_model"] or "").strip():
-                st.session_state["llm_model"] = llm_model_default
-
-        # Field controlled via session_state
-        llm_model = st.text_input("LLM model", key="llm_model")
-
-        # Temperature slider (as in your code)
-        if "llm_temperature" not in st.session_state:
-            st.session_state["llm_temperature"] = float(prefs.get("llm_temperature", 0.2))
-        llm_temperature = st.slider("Temperature", 0.0, 1.5, st.session_state["llm_temperature"], 0.05)
-        st.session_state["llm_temperature"] = llm_temperature
-
-        # --- [SIDEBAR > API Keys] ---
-        st.header("API Keys")
-        # Read providers from session_state (fallback to defaults / prefs)
-        emb_backend = st.session_state.get(
-            "emb_provider_select",
-            getattr(prefs, "emb_backend", "OpenAI")
-            if hasattr(prefs, "emb_backend") else "OpenAI",
-        )
-
-        llm_provider = st.session_state.get(
-            "llm_provider_select",
-            getattr(prefs, "llm_provider", "OpenAI")
-            if hasattr(prefs, "llm_provider") else "OpenAI",
-        )
-
-        openai_needed = (emb_backend == "OpenAI") or (llm_provider == "OpenAI")
-
-        openai_key_input = st.text_input("OpenAI API Key",
-            type="password",
-            value=st.session_state.get("openai_key", ""),
-            disabled=not openai_needed,
-            help="Used only if you choose OpenAI as provider for Embeddings or LLM."
-        )
-
-        if openai_key_input:
-            st.session_state["openai_key"] = openai_key_input
-
-        if not openai_needed:
-            st.caption("OpenAI API Key not needed: you are using only local providers (Ollama / sentence-transformers).")
-        elif (llm_provider == "Ollama (local)") and (emb_backend == "OpenAI"):
-            st.info("You are using: LLM = Ollama, Embeddings = OpenAI → the key will be used only for embeddings.")
+        st.caption(f"Provider: {llm_provider}")
+        st.caption(f"Model: {llm_model}")
+        st.caption(f"Temperature: {llm_temperature:.2f}")
 
         # --- Retrieval summary (read-only) ---
         st.markdown("---")
@@ -1434,7 +1483,12 @@ def run_streamlit_app():
                     try:
                         # --- Provider coercion: if Ollama not available, force OpenAI ---
                         _provider_for_save = st.session_state.get("last_llm_provider", llm_provider)
-                        if not ollama_ok and _provider_for_save == "Ollama (local)":
+                        # Local Ollama availability check (do not rely on UI-phase variable)
+                        if IS_CLOUD:
+                            _ollama_ok = False
+                        else:
+                            _ollama_ok, _ = is_ollama_available()
+                        if not _ollama_ok and _provider_for_save == "Ollama (local)":
                             _provider_for_save = "OpenAI"
 
                         # --- LLM model: never empty and consistent with provider ---
@@ -1742,6 +1796,16 @@ def run_streamlit_app():
 
     # Ingest
     st.subheader("Vector DB Indexing")
+    # --- Embeddings backend/model for ingestion, chat and playbooks ---
+    emb_backend = st.session_state.get(
+        "emb_provider_select",
+        prefs.get("emb_backend", "OpenAI"),
+    )
+    emb_model_name = st.session_state.get(
+        "emb_model",
+        prefs.get("emb_model_name", "text-embedding-3-small"),
+    )
+
     col1, col2 = st.columns([1, 3])
     with col1:
         start_ingest = st.button("Index tickets")
