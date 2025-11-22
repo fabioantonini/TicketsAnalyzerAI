@@ -314,7 +314,7 @@ DEFAULT_COLLECTION = "tickets"
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_LLM_MODEL = "gpt-4o"
 DEFAULT_OLLAMA_MODEL = "llama3.2"
-
+NEW_LABEL = "➕ Create new collection..."
 
 # ------------------------------
 # YouTrack Client + DTO
@@ -676,6 +676,330 @@ def render_phase_yt_connection_page(prefs):
 
     return yt_url, yt_token, connect
 
+def render_phase_embeddings_vectordb_page(prefs):
+    import streamlit as st
+
+    # Normalize prefs to a dict
+    if isinstance(prefs, dict):
+        prefs_dict = prefs
+    else:
+        prefs_dict = st.session_state.get("prefs", {})
+
+    st.title("Phase 2 – Embeddings & Vector DB")
+    st.write(
+        "Configure the Chroma vector store (path and collections) and the embeddings "
+        "provider/model used for indexing and query."
+    )
+
+    # Small status summary on top
+    current_dir = st.session_state.get("persist_dir", prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR))
+    current_collection = st.session_state.get("vs_collection", "")
+    current_provider = st.session_state.get("emb_provider_select", "OpenAI")
+    current_model = st.session_state.get("emb_model", "")
+
+    st.info(
+        f"Current collection: **{current_collection or 'none'}** · "
+        f"Provider: **{current_provider}** · Model: **{current_model or 'n/a'}**"
+    )
+
+    st.markdown("---")
+
+    # -----------------------------
+    # Vector DB configuration
+    # -----------------------------
+    st.header("Vector DB")
+
+    persist_dir_default = prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
+    persist_dir = st.text_input(
+        "Chroma path",
+        value=st.session_state.get("persist_dir", persist_dir_default),
+        key="persist_dir",
+        help="Directory where Chroma will store its collections.",
+    )
+
+    # Ensure directory exists
+    try:
+        os.makedirs(persist_dir, exist_ok=True)
+        st.caption(f"Current Chroma path: {persist_dir}")
+    except Exception as e:
+        st.error(f"Failed to create directory '{persist_dir}': {e}")
+        return
+
+    # -----------------------------
+    # Read existing collections
+    # -----------------------------
+    coll_options: list[str] = []
+    try:
+        if chromadb is not None:
+            _client = get_chroma_client(persist_dir)
+            coll_options = [c.name for c in _client.list_collections()]  # type: ignore
+    except Exception as e:
+        st.caption(f"Unable to read collections from '{persist_dir}': {e}")
+
+    # -----------------------------
+    # Keep last selection / new name
+    # -----------------------------
+    last_sel = st.session_state.get("collection_selected")
+    if not last_sel:
+        last_sel = (prefs_dict.get("collection_selected") or "").strip() or None
+
+    last_new = st.session_state.get("new_collection_name_input")
+    if not last_new:
+        last_new = prefs_dict.get("new_collection_name", DEFAULT_COLLECTION)
+
+    st.caption(f"Selected pref: {prefs_dict.get('collection_selected', '—')}  ·  Path: {persist_dir}")
+
+    # -----------------------------
+    # Select / create collection
+    # -----------------------------
+    if coll_options:
+        opts = coll_options + [NEW_LABEL]
+
+        if last_sel in opts:
+            default_index = opts.index(last_sel)
+        elif DEFAULT_COLLECTION in opts:
+            default_index = opts.index(DEFAULT_COLLECTION)
+        else:
+            default_index = 0
+
+        sel = st.selectbox(
+            "Collection",
+            options=opts,
+            index=default_index,
+            key="collection_select",
+        )
+
+        if sel == NEW_LABEL:
+            new_name = st.text_input("New collection name", key="new_collection_name_input", value=last_new)
+            collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION
+            st.session_state["collection_selected"] = NEW_LABEL
+            st.session_state["vs_collection"] = collection_name
+        else:
+            collection_name = sel
+            st.session_state["collection_selected"] = sel
+            st.session_state["vs_collection"] = collection_name
+            st.session_state["after_delete_reset"] = True
+    else:
+        st.caption("No collection found. Create a new one:")
+        new_name = st.text_input("New collection", key="new_collection_name_input", value=last_new)
+        collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION
+        st.session_state["collection_selected"] = NEW_LABEL
+        st.session_state["vs_collection"] = collection_name
+
+    # -----------------------------
+    # Advanced settings reset (pre-widgets)
+    # -----------------------------
+    if st.session_state.pop("_adv_do_reset", False):
+        _defaults = {
+            # Advanced
+            "adv_show_distances": False,
+            "adv_top_k": 5,
+            "adv_collapse_duplicates": True,
+            "adv_per_parent_display": 1,
+            "adv_per_parent_prompt": 3,
+            "adv_stitch_max_chars": 1500,
+            # Chunking
+            "enable_chunking": True,
+            "chunk_size": 800,
+            "chunk_overlap": 80,
+            "chunk_min": 512,
+        }
+        for _k, _v in _defaults.items():
+            st.session_state[_k] = _v
+        st.session_state["_adv_reset_toast"] = True
+
+    # -----------------------------
+    # Advanced settings (UI)
+    # -----------------------------
+    with st.expander("Advanced settings", expanded=False):
+        show_distances = st.checkbox(
+            "Show distances in results",
+            key="adv_show_distances",
+            help="Display the distance/score next to each retrieved result.",
+        )
+
+        top_k = st.number_input(
+            "Top-K KB results",
+            min_value=1,
+            max_value=50,
+            step=1,
+            key="adv_top_k",
+            help="Number of Knowledge Base results to pass downstream (before collapsing duplicates).",
+        )
+
+        collapse_duplicates = st.checkbox(
+            "Collapse duplicate results by ticket",
+            key="adv_collapse_duplicates",
+            help="Show only one result per ticket in the UI (keeps recall for the prompt context).",
+        )
+
+        per_parent_display = st.number_input(
+            "Max results per ticket (UI)",
+            min_value=1,
+            max_value=10,
+            step=1,
+            key="adv_per_parent_display",
+            help="Maximum number of results displayed for the same ticket in the UI.",
+        )
+
+        per_parent_prompt = st.number_input(
+            "Max chunks per ticket (prompt)",
+            min_value=1,
+            max_value=10,
+            step=1,
+            key="adv_per_parent_prompt",
+            help="Maximum number of chunks concatenated per ticket in the prompt context.",
+        )
+
+        stitch_max_chars = st.number_input(
+            "Stitched context limit (chars)",
+            min_value=200,
+            max_value=20000,
+            step=100,
+            key="adv_stitch_max_chars",
+            help="Character limit when concatenating multiple chunks of the same ticket for the prompt context.",
+        )
+
+        if st.button("Reset to defaults", key="adv_reset_btn"):
+            st.session_state["_adv_do_reset"] = True
+            st.rerun()
+
+    if st.session_state.pop("_adv_reset_toast", False):
+        st.toast("Advanced settings reset to defaults", icon="↩️")
+
+    # Make them available during the current run (for downstream functions)
+    st.session_state["show_distances"] = st.session_state.get("adv_show_distances", False)
+    st.session_state["top_k"] = int(st.session_state.get("adv_top_k", 5))
+    st.session_state["collapse_duplicates"] = st.session_state.get("adv_collapse_duplicates", True)
+    st.session_state["per_parent_display"] = int(st.session_state.get("adv_per_parent_display", 1))
+    st.session_state["per_parent_prompt"] = int(st.session_state.get("adv_per_parent_prompt", 3))
+    st.session_state["stitch_max_chars"] = int(st.session_state.get("adv_stitch_max_chars", 1500))
+
+    # -----------------------------
+    # Collection management: delete
+    # -----------------------------
+    st.markdown("---")
+    st.subheader("Collection management")
+
+    is_existing_collection = collection_name in coll_options
+
+    del_confirm = st.checkbox(
+        f"Confirm deletion of '{collection_name}'",
+        value=False,
+        disabled=not is_existing_collection,
+        help="This operation permanently removes the collection from the datastore.",
+    )
+
+    if st.button(
+        "Delete collection",
+        type="secondary",
+        disabled=not is_existing_collection,
+        help="Permanently removes the selected collection from the vector datastore.",
+    ):
+        if not del_confirm:
+            st.warning("Check the confirmation box to proceed with deletion.")
+        else:
+            try:
+                _client = get_chroma_client(persist_dir)
+                _client.delete_collection(name=collection_name)
+
+                # Remove the collection meta (provider/model) if present
+                meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+                try:
+                    if os.path.exists(meta_path):
+                        os.remove(meta_path)
+                except Exception:
+                    pass  # do not block the UX if meta deletion fails
+
+                # Clean state if it was pointing to the removed collection
+                if st.session_state.get("vs_collection") == collection_name:
+                    st.session_state["vector"] = None
+                    st.session_state["vs_collection"] = None
+                    st.session_state["vs_count"] = 0
+                    st.session_state["vs_persist_dir"] = persist_dir
+
+                # Clear any loaded results/issues (optional but recommended)
+                st.session_state["issues"] = []
+
+                # Remove selection and new name from session
+                st.session_state["collection_selected"] = None
+                st.session_state["after_delete_reset"] = True
+
+                # Update sticky prefs, if present
+                prefs_in_state = st.session_state.get("prefs", {})
+                prefs_in_state["collection_selected"] = None
+                prefs_in_state["new_collection_name"] = DEFAULT_COLLECTION
+                st.session_state["prefs"] = prefs_in_state
+                try:
+                    save_prefs(prefs_in_state)
+                except Exception:
+                    pass
+
+                st.success(f"Collection '{collection_name}' deleted successfully.")
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Error during deletion: {e}")
+
+    st.markdown("---")
+
+    # -----------------------------
+    # Embeddings configuration
+    # -----------------------------
+    st.header("Embeddings")
+
+    emb_backends: list[str] = []
+    if SentenceTransformer is not None and not IS_CLOUD:
+        emb_backends.append("Local (sentence-transformers)")
+    emb_backends.append("OpenAI")
+
+    pref_backend = prefs_dict.get("emb_backend") or "OpenAI"
+    if pref_backend == "Local (sentence-transformers)" and "Local (sentence-transformers)" not in emb_backends:
+        pref_backend = "OpenAI"
+
+    emb_backend = st.selectbox(
+        "Embeddings provider",
+        options=emb_backends,
+        index=emb_backends.index(pref_backend),
+        key="emb_provider_select",
+    )
+
+    # Reset the model ONLY if the user has just changed the provider
+    prev_backend = st.session_state.get("_prev_emb_backend")
+
+    if prev_backend is None:
+        # First time: keep the existing model from prefs/session_state
+        st.session_state["_prev_emb_backend"] = emb_backend
+
+    elif prev_backend != emb_backend:
+        # Real provider change → reset model accordingly
+        st.session_state["_prev_emb_backend"] = emb_backend
+        st.session_state["emb_model"] = (
+            "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
+        )
+
+    if "emb_model" not in st.session_state:
+        st.session_state["emb_model"] = prefs_dict.get(
+            "emb_model_name",
+            "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small",
+        )
+
+    emb_model_options = (
+        ["all-MiniLM-L6-v2"]
+        if emb_backend == "Local (sentence-transformers)"
+        else ["text-embedding-3-small", "text-embedding-3-large"]
+    )
+
+    if st.session_state["emb_model"] not in emb_model_options:
+        st.session_state["emb_model"] = emb_model_options[0]
+
+    emb_model_name = st.selectbox(
+        "Embeddings model",
+        options=emb_model_options,
+        index=emb_model_options.index(st.session_state["emb_model"]),
+        key="emb_model",
+    )
+
 # ------------------------------
 # Main Streamlit UI
 # ------------------------------
@@ -769,6 +1093,10 @@ def run_streamlit_app():
     if phase == "YouTrack connection":
         yt_url, yt_token, connect = render_phase_yt_connection_page(prefs)
 
+    # Phase 2 – Embeddings & Vector DB (page)
+    if phase == "Embeddings & Vector DB":
+        render_phase_embeddings_vectordb_page(prefs)
+
     with st.sidebar:
         # --- Wizard-style navigation (visual only, all sections still visible) ---
         PHASES = [
@@ -816,262 +1144,22 @@ def run_streamlit_app():
         st.caption(st.session_state.get("yt_url", prefs.get("yt_url", "")) or "No URL configured")
 
         st.markdown("---")
-        st.header("Vector DB")
-        persist_dir = st.text_input("Chroma path", value=prefs.get("persist_dir", DEFAULT_CHROMA_DIR), key="persist_dir")
-        # Patch 6: create the directory and show the current path
-        os.makedirs(persist_dir, exist_ok=True)
-        st.caption(f"Current Chroma path: {persist_dir}")
+        st.markdown("### Vector DB / Embeddings status")
 
-        # Read existing collections
-        coll_options = []
-        try:
-            if chromadb is not None:
-                _client = get_chroma_client(persist_dir)
-                coll_options = [c.name for c in _client.list_collections()]  # type: ignore
-        except Exception as e:
-            st.caption(f"Unable to read collections from '{persist_dir}': {e}")
+        persist_dir = st.session_state.get("persist_dir", prefs.get("persist_dir", ""))
+        vs_collection = st.session_state.get("vs_collection", "")
+        emb_provider = st.session_state.get("emb_provider_select", "OpenAI")
+        emb_model = st.session_state.get("emb_model", "")
 
-        NEW_LABEL = "➕ Create new collection..."
-        # Keep the last selected/new collection name in session
-        prefs = st.session_state.get("prefs", {})
-
-        # Fallback: first session → then prefs → None
-        last_sel = st.session_state.get("collection_selected")
-        if not last_sel:
-            last_sel = (prefs.get("collection_selected") or "").strip() or None
-
-        last_new = st.session_state.get("new_collection_name_input")
-        if not last_new:
-            last_new = (prefs.get("new_collection_name") or DEFAULT_COLLECTION)
-
-        st.caption(f"Selected pref: {prefs.get('collection_selected', '—')}  ·  Path: {persist_dir}")
-
-        if coll_options:
-            opts = coll_options + [NEW_LABEL]
-
-            # If a valid last selection exists, use it; otherwise default to 0
-            if last_sel in opts:
-                default_index = opts.index(last_sel)
-            elif DEFAULT_COLLECTION in opts:
-                default_index = opts.index(DEFAULT_COLLECTION)
-            else:
-                default_index = 0
-
-            sel = st.selectbox("Collection", options=opts, index=default_index, key="collection_select")
-
-            if sel == NEW_LABEL:
-                new_name = st.text_input("New Collection name", key="new_collection_name_input")
-                collection_name = (st.session_state["new_collection_name_input"] or "").strip() or DEFAULT_COLLECTION
-                # Record that we are creating a new collection
-                st.session_state["collection_selected"] = NEW_LABEL
-            else:
-                collection_name = sel
-                st.session_state["collection_selected"] = sel
-                st.session_state["after_delete_reset"] = True  # optional reset
+        if vs_collection:
+            st.success(f"Collection: {vs_collection}")
         else:
-            st.caption("No collection found. Create a new one:")
-            new_name = st.text_input("New Collection", key="new_collection_name_input")
-            collection_name = (st.session_state["new_collection_name_input"] or "").strip() or DEFAULT_COLLECTION
-            st.session_state["collection_selected"] = NEW_LABEL
+            st.warning("No collection selected")
 
-        # --- Advanced settings: pre-reset (prima di creare i widget) ---
-        if st.session_state.pop("_adv_do_reset", False):
-            _defaults = {
-                # Advanced
-                "adv_show_distances": False,
-                "adv_top_k": 5,
-                "adv_collapse_duplicates": True,
-                "adv_per_parent_display": 1,
-                "adv_per_parent_prompt": 3,
-                "adv_stitch_max_chars": 1500,
-                # Chunking
-                "enable_chunking": True,
-                "chunk_size": 800,
-                "chunk_overlap": 80,
-                "chunk_min": 512,
-            }
-            for _k, _v in _defaults.items():
-                st.session_state[_k] = _v
-            st.session_state["_adv_reset_toast"] = True
-
-        # === Advanced settings ===
-        with st.expander("Advanced settings", expanded=False):
-            # Visibility / Recall
-            show_distances = st.checkbox(
-                "Show distances in results",
-                key="adv_show_distances",
-                help="Display the distance/score next to each retrieved result."
-            )
-
-            top_k = st.number_input(
-                "Top-K KB results",
-                min_value=1, max_value=50, step=1,
-                key="adv_top_k",
-                help="Number of Knowledge Base results to pass downstream (before collapsing duplicates)."
-            )
-
-            collapse_duplicates = st.checkbox(
-                "Collapse duplicate results by ticket",
-                key="adv_collapse_duplicates",
-                help="Show only one result per ticket in the UI (keeps recall for the prompt context)."
-            )
-
-            # Per-document granularity
-            per_parent_display = st.number_input(
-                "Max results per ticket (UI)",
-                min_value=1, max_value=10, step=1,
-                key="adv_per_parent_display",
-                help="Maximum number of results displayed for the same ticket in the UI."
-            )
-
-            per_parent_prompt = st.number_input(
-                "Max chunks per ticket (prompt)",
-                min_value=1, max_value=10, step=1,
-                key="adv_per_parent_prompt",
-                help="Maximum number of chunks concatenated per ticket in the prompt context."
-            )
-
-            stitch_max_chars = st.number_input(
-                "Stitched context limit (chars)",
-                min_value=200, max_value=20000, step=100,
-                key="adv_stitch_max_chars",
-                help="Character limit when concatenating multiple chunks of the same ticket for the prompt context."
-            )
-
-            if st.button("Reset to defaults", key="adv_reset_btn"):
-                st.session_state["_adv_do_reset"] = True
-                st.rerun()
-
-        if st.session_state.pop("_adv_reset_toast", False):
-            st.toast("Advanced settings reset to defaults", icon="↩️")
-
-        # Make them available during the current run (for downstream functions)
-        st.session_state["show_distances"] = st.session_state.get("adv_show_distances", False)
-        st.session_state["top_k"] = int(st.session_state.get("adv_top_k", 5))
-        st.session_state["collapse_duplicates"] = st.session_state.get("adv_collapse_duplicates", True)
-        st.session_state["per_parent_display"] = int(st.session_state.get("adv_per_parent_display", 1))
-        st.session_state["per_parent_prompt"] = int(st.session_state.get("adv_per_parent_prompt", 3))
-        st.session_state["stitch_max_chars"] = int(st.session_state.get("adv_stitch_max_chars", 1500))
-
-        # --- Collection management: delete ---
-        st.markdown("—")
-        st.subheader("Collection management")
-        is_existing_collection = collection_name in coll_options
-
-        del_confirm = st.checkbox(f"Confirm deletion of '{collection_name}'",
-            value=False,
-            disabled=not is_existing_collection,
-            help="This operation permanently removes the collection from the datastore."
-        )
-
-        if st.button(
-            "Delete collection",
-            type="secondary",
-            disabled=not is_existing_collection,
-            help="Permanently removes the selected collection from the vector datastore."
-        ):
-            if not del_confirm:
-                st.warning("Check the confirmation box to proceed with deletion.")
-            else:
-                try:
-                    _client = get_chroma_client(persist_dir)
-                    _client.delete_collection(name=collection_name)
-
-                    # Remove the collection meta (provider/model) if present
-                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
-                    try:
-                        if os.path.exists(meta_path):
-                            os.remove(meta_path)
-                    except Exception:
-                        pass  # do not block the UX if meta deletion fails
-
-                    # Clean state if it was pointing to the removed collection
-                    if st.session_state.get("vs_collection") == collection_name:
-                        st.session_state["vector"] = None
-                        st.session_state["vs_collection"] = None
-                        st.session_state["vs_count"] = 0
-                        st.session_state["vs_persist_dir"] = persist_dir  # optional: keep the current path
-
-                    # Clear any loaded results/issues (optional but recommended)
-                    st.session_state["issues"] = []
-
-                    # Remove selection and new name from session
-                    st.session_state["collection_selected"] = None
-                    st.session_state["after_delete_reset"] = True
-
-                    # Also update sticky prefs, if present
-                    prefs = st.session_state.get("prefs", {})
-                    prefs["collection_selected"] = None
-                    prefs["new_collection_name"] = DEFAULT_COLLECTION
-                    st.session_state["prefs"] = prefs
-                    # If save_prefs() is defined, update file on disk (safe no-op if absent)
-                    try:
-                        save_prefs(prefs)
-                    except Exception:
-                        pass
-
-                    st.success(f"Collection '{collection_name}' deleted successfully.")
-                    st.rerun()
-
-                except Exception as e:
-                    st.error(f"Error during deletion: {e}")
-
+        st.caption(persist_dir or "No Chroma path configured")
+        st.caption(f"Embeddings: {emb_provider} · {emb_model or 'n/a'}")
 
         st.markdown("---")
-        # --- [SIDEBAR > Embeddings] replace the current block with this ---
-
-        st.header("Embeddings")
-
-        # Build the list deterministically
-        emb_backends = []
-        if SentenceTransformer is not None and not IS_CLOUD:
-            emb_backends.append("Local (sentence-transformers)")
-        emb_backends.append("OpenAI")  # OpenAI is always available in the list
-
-        # Preferred backend from prefs, with robust fallback
-        pref_backend = (prefs.get("emb_backend") or "OpenAI")
-        if pref_backend == "Local (sentence-transformers)" and "Local (sentence-transformers)" not in emb_backends:
-            pref_backend = "OpenAI"
-
-        # Use the index of the preferred backend (not hardcoded to 0)
-        emb_backend = st.selectbox(
-            "Embeddings provider",
-            options=emb_backends,
-            index=emb_backends.index(pref_backend),
-            key="emb_provider_select",
-        )
-
-        # Reset model when provider changes
-        prev_emb_backend = st.session_state.get("last_emb_backend")
-        if prev_emb_backend != emb_backend:
-            st.session_state["last_emb_backend"] = emb_backend
-            st.session_state["emb_model"] = (
-                "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
-            )
-
-        # Initialize the model ONLY ONCE using prefs
-        if "emb_model" not in st.session_state:
-            st.session_state["emb_model"] = prefs.get(
-                "emb_model_name",
-                "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
-            )
-
-        # Model options consistent with the current provider
-        emb_model_options = (
-            ["all-MiniLM-L6-v2"] if emb_backend == "Local (sentence-transformers)"
-            else ["text-embedding-3-small", "text-embedding-3-large"]
-        )
-
-        # Realign if the current value is not in the valid options
-        if st.session_state["emb_model"] not in emb_model_options:
-            st.session_state["emb_model"] = emb_model_options[0]
-
-        emb_model_name = st.selectbox(
-            "Embeddings model",
-            options=emb_model_options,
-            index=emb_model_options.index(st.session_state["emb_model"]),
-            key="emb_model"
-        )
 
         st.header("Retrieval")
         if "max_distance" not in st.session_state:
@@ -1144,6 +1232,19 @@ def run_streamlit_app():
 
         # --- [SIDEBAR > API Keys] ---
         st.header("API Keys")
+        # Read providers from session_state (fallback to defaults / prefs)
+        emb_backend = st.session_state.get(
+            "emb_provider_select",
+            getattr(prefs, "emb_backend", "OpenAI")
+            if hasattr(prefs, "emb_backend") else "OpenAI",
+        )
+
+        llm_provider = st.session_state.get(
+            "llm_provider_select",
+            getattr(prefs, "llm_provider", "OpenAI")
+            if hasattr(prefs, "llm_provider") else "OpenAI",
+        )
+
         openai_needed = (emb_backend == "OpenAI") or (llm_provider == "OpenAI")
 
         openai_key_input = st.text_input("OpenAI API Key",
@@ -1402,6 +1503,17 @@ def run_streamlit_app():
         # Automatic opening of the selected collection (without re-indexing)
         # Avoid opening if the user has chosen "Create new…" but has not entered a name different from the default
         vector_ready = False
+        # Read persist_dir and collection name from session_state
+        persist_dir = st.session_state.get(
+            "persist_dir",
+            prefs.get("persist_dir", DEFAULT_CHROMA_DIR) if isinstance(prefs, dict) else DEFAULT_CHROMA_DIR,
+        )
+
+        collection_name = (
+            st.session_state.get("vs_collection")
+            or st.session_state.get("new_collection_name_input", DEFAULT_COLLECTION)
+        )
+
         if persist_dir and collection_name:
             changed = (
                 st.session_state.get("vs_persist_dir") != persist_dir
