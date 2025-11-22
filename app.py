@@ -1000,6 +1000,86 @@ def render_phase_embeddings_vectordb_page(prefs):
         key="emb_model",
     )
 
+def render_phase_retrieval_page(prefs):
+    import streamlit as st
+
+    # Normalizza prefs in dict
+    if isinstance(prefs, dict):
+        prefs_dict = prefs
+    else:
+        prefs_dict = st.session_state.get("prefs", {})
+
+    st.title("Phase 3 – Retrieval configuration")
+    st.write(
+        "Configure the distance threshold and chunking parameters used to retrieve "
+        "similar tickets from the vector store."
+    )
+
+    st.markdown("### Distance threshold")
+
+    max_default = float(prefs_dict.get("max_distance", 0.9))
+    max_distance = st.slider(
+        "Maximum distance threshold (cosine)",
+        min_value=0.1,
+        max_value=2.0,
+        step=0.05,
+        value=float(st.session_state.get("max_distance", max_default)),
+        key="max_distance",
+        help="Maximum cosine distance for a result to be considered similar."
+    )
+    # Nessuna scrittura manuale in session_state: ci pensa lo slider
+
+    st.markdown("---")
+    st.subheader("Chunking configuration")
+
+    enable_default = bool(prefs_dict.get("enable_chunking", True))
+    st.checkbox(
+        "Enable chunking",
+        key="enable_chunking",
+        value=bool(st.session_state.get("enable_chunking", enable_default)),
+        help="If enabled, long tickets are split into overlapping chunks before indexing."
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.number_input(
+            "Chunk size (tokens)",
+            min_value=128,
+            max_value=2048,
+            step=64,
+            key="chunk_size",
+            value=int(st.session_state.get("chunk_size", prefs_dict.get("chunk_size", 800))),
+            help="Typical values: 512–800."
+        )
+
+    with c2:
+        st.number_input(
+            "Overlap (tokens)",
+            min_value=0,
+            max_value=512,
+            step=10,
+            key="chunk_overlap",
+            value=int(st.session_state.get("chunk_overlap", prefs_dict.get("chunk_overlap", 80))),
+            help="How many tokens to overlap between consecutive chunks."
+        )
+
+    with c3:
+        st.number_input(
+            "Min size to chunk",
+            min_value=128,
+            max_value=2048,
+            step=64,
+            key="chunk_min",
+            value=int(st.session_state.get("chunk_min", prefs_dict.get("chunk_min", 512))),
+            help="Below this size, the ticket is indexed as a single document."
+        )
+
+    st.info(
+        "These settings are used when you run indexing (Phase 2) and when the retriever "
+        "filters similar tickets (Phase 6)."
+    )
+
 # ------------------------------
 # Main Streamlit UI
 # ------------------------------
@@ -1097,6 +1177,10 @@ def run_streamlit_app():
     if phase == "Embeddings & Vector DB":
         render_phase_embeddings_vectordb_page(prefs)
 
+    # Phase 3 – Retrieval configuration (page)
+    if phase == "Retrieval configuration":
+        render_phase_retrieval_page(prefs)
+
     with st.sidebar:
         # --- Wizard-style navigation (visual only, all sections still visible) ---
         PHASES = [
@@ -1161,28 +1245,6 @@ def run_streamlit_app():
 
         st.markdown("---")
 
-        st.header("Retrieval")
-        if "max_distance" not in st.session_state:
-            st.session_state["max_distance"] = float(prefs.get("max_distance", 0.9))
-        max_distance = st.slider("Maximum distance threshold (cosine)", 0.1, 2.0, st.session_state["max_distance"], 0.05)
-        st.session_state["max_distance"] = max_distance
-
-        # NEW: Chunking params
-        c_a, c_b, c_c = st.columns(3)
-        with c_a:
-            chunk_size = st.number_input("Chunk size (tokens)", min_value=128, max_value=2048, step=64, help="512–800 suggested", key="chunk_size")
-        with c_b:
-            chunk_overlap = st.number_input("Overlap (tokens)", min_value=0, max_value=512, step=10, key="chunk_overlap")
-        with c_c:
-            chunk_min = st.number_input("Min size to chunk", min_value=128, max_value=2048, step=64, key="chunk_min")
-
-        # NEW: toggle to enable/disable chunking at ingestion time
-        enable_chunking = st.checkbox("Enable chunking",
-            value=False,
-            help="Disable for short, self-contained tickets (index 1 document per ticket)."
-        )
-
-        st.markdown("---")
         st.header("LLM")
 
         # Ollama detection
@@ -1686,6 +1748,12 @@ def run_streamlit_app():
     with col2:
         st.caption("Create ticket embeddings and save them to Chroma for semantic retrieval")
 
+    # Read chunking configuration from session_state
+    enable_chunking = bool(st.session_state.get("enable_chunking", True))
+    chunk_size = int(st.session_state.get("chunk_size", 800))
+    chunk_overlap = int(st.session_state.get("chunk_overlap", 80))
+    chunk_min = int(st.session_state.get("chunk_min", 512))
+
     if start_ingest:
         issues = st.session_state.get("issues", [])
         if not issues:
@@ -1806,6 +1874,7 @@ def run_streamlit_app():
                 kb_metas = kb_res.get("metadatas", [[]])[0]
                 kb_dists = kb_res.get("distances", [[]])[0]
 
+                max_distance = float(st.session_state.get("max_distance", prefs.get("max_distance", 0.9)))
                 DIST_MAX_KB = max_distance
                 kb_retrieved = [
                     (doc, meta, dist, "KB")
