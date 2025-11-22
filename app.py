@@ -641,6 +641,40 @@ def open_vector_in_session(persist_dir: str, collection_name: str):
             pass
         return False, -1, str(e)
 
+def render_phase_yt_connection_page(prefs):
+    import streamlit as st  # local import to keep signature simple
+
+    st.title("Phase 1 – YouTrack connection")
+    st.write("Configure the YouTrack endpoint used to fetch and index tickets.")
+
+    if st.session_state.get("yt_client"):
+        st.success("Connected to YouTrack")
+
+    # Read current values (from session_state or prefs)
+    current_url = st.session_state.get("yt_url", prefs.get("yt_url", ""))
+    current_token = st.session_state.get("yt_token", "")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        yt_url = st.text_input(
+            "YouTrack server URL",
+            value=current_url,
+            placeholder="https://<org>.myjetbrains.com/youtrack",
+        )
+    with col2:
+        yt_token = st.text_input(
+            "YouTrack token (Bearer)",
+            type="password",
+            value=current_token,
+        )
+
+    # Keep state in session_state (not in prefs, to avoid writing token to disk)
+    st.session_state["yt_url"] = yt_url
+    st.session_state["yt_token"] = yt_token
+
+    connect = st.button("Connect to YouTrack")
+
+    return yt_url, yt_token, connect
 
 # ------------------------------
 # Main Streamlit UI
@@ -725,21 +759,61 @@ def run_streamlit_app():
 
     st.title("YouTrack RAG Support")
     st.caption("Support ticket management based on YouTrack history + RAG + LLM")
+    phase = st.session_state.get("ui_phase_choice", "YouTrack connection")
+
+    # Default values, in case we are not on this phase
+    yt_url = st.session_state.get("yt_url", prefs.get("yt_url", ""))
+    yt_token = st.session_state.get("yt_token", "")
+    connect = False
+
+    if phase == "YouTrack connection":
+        yt_url, yt_token, connect = render_phase_yt_connection_page(prefs)
 
     with st.sidebar:
-        quit_btn = False
-        st.header("YouTrack Connection")
-        # Pre-reset (must happen BEFORE widgets creation)
-        if st.session_state.get("after_delete_reset"):
-            st.session_state["new_collection_name_input"] = DEFAULT_COLLECTION
-            st.session_state["after_delete_reset"] = False
+        # --- Wizard-style navigation (visual only, all sections still visible) ---
+        PHASES = [
+            "New RAG setup",
+            "YouTrack connection",
+            "Embeddings & Vector DB",
+            "Retrieval configuration",
+            "LLM & API keys",
+            "Chat & results",
+            "Solutions memory",
+            "Preferences & debug",
+        ]
 
-        yt_url = st.text_input("Server URL",
-            value=prefs.get("yt_url", ""),
-            placeholder="https://<org>.myjetbrains.com/youtrack",
+        if "ui_phase_choice" not in st.session_state:
+            st.session_state["ui_phase_choice"] = PHASES[0]
+
+        # Default index: keep last selection if present, otherwise 0
+        default_idx = int(st.session_state.get("ui_phase_index", 0))
+        if default_idx < 0 or default_idx >= len(PHASES):
+            default_idx = 0
+
+        current_phase = st.radio(
+            "Current phase",
+            options=PHASES,
+            key="ui_phase_choice",
+            help="This is only a visual wizard for now: all sidebar sections remain visible.",
         )
-        yt_token = st.text_input("Token (Bearer)", type="password")
-        connect = st.button("Connect YouTrack")
+
+        if isinstance(current_phase, str):
+            st.session_state["ui_phase_index"] = PHASES.index(current_phase)
+
+        # Simple progress bar for the wizard
+        step_idx = st.session_state.get("ui_phase_index", 0)
+        st.progress((step_idx + 1) / len(PHASES), text=f"Step {step_idx + 1} / {len(PHASES)}")
+
+        st.markdown("---")
+
+        quit_btn = False
+        st.markdown("### YouTrack status")
+        if st.session_state.get("yt_client"):
+            st.success("Connected to YouTrack")
+        else:
+            st.warning("Not connected to YouTrack")
+
+        st.caption(st.session_state.get("yt_url", prefs.get("yt_url", "")) or "No URL configured")
 
         st.markdown("---")
         st.header("Vector DB")
@@ -1374,9 +1448,9 @@ def run_streamlit_app():
         else:
             try:
                 st.session_state["yt_client"] = YouTrackClient(yt_url, yt_token)
-                st.success("Connected to YouTrack")
                 with st.spinner("Loading projects..."):
                     st.session_state["projects"] = st.session_state["yt_client"].list_projects()
+                st.rerun()
             except Exception as e:
                 st.error(f"Connection failed: {e}")
 
