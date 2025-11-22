@@ -1195,6 +1195,318 @@ def render_phase_llm_page(prefs):
     elif (llm_provider == "Ollama (local)") and (emb_backend == "OpenAI"):
         st.info("You are using: LLM = Ollama, Embeddings = OpenAI → the key will be used only for embeddings.")
 
+def render_phase_chat_page(prefs):
+    import streamlit as st
+
+    # Normalize prefs to a dict
+    if isinstance(prefs, dict):
+        prefs_dict = prefs
+    else:
+        prefs_dict = st.session_state.get("prefs", {})
+
+    # Persist dir and collection from session_state (with prefs fallback)
+    persist_dir = st.session_state.get(
+        "persist_dir",
+        prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR),
+    )
+
+    collection_name = st.session_state.get(
+        "vs_collection",
+        st.session_state.get("new_collection_name_input", DEFAULT_COLLECTION),
+    )
+
+    max_distance = float(
+        st.session_state.get("max_distance", prefs_dict.get("max_distance", 0.9))
+    )
+
+    # Embeddings backend/model for retrieval + memory
+    emb_backend = st.session_state.get(
+        "emb_provider_select",
+        prefs_dict.get("emb_backend", "OpenAI"),
+    )
+    emb_model_name = st.session_state.get(
+        "emb_model",
+        prefs_dict.get("emb_model_name", "text-embedding-3-small"),
+    )
+
+    # LLM provider/model/temperature for chat + playbooks
+    llm_provider = st.session_state.get(
+        "llm_provider_select",
+        prefs_dict.get("llm_provider", "OpenAI"),
+    )
+    llm_temperature = float(
+        st.session_state.get("llm_temperature", prefs_dict.get("llm_temperature", 0.2))
+    )
+    llm_model = st.session_state.get(
+        "llm_model",
+        prefs_dict.get(
+            "llm_model",
+            DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL,
+        ),
+    )
+
+    st.title("Phase 5 – Chat & Results")
+    st.write(
+        "Ask questions about your YouTrack tickets. The app retrieves similar tickets "
+        "from the vector store, sends them to the LLM, and shows the answer together "
+        "with the retrieved context."
+    )
+
+    st.markdown("---")
+
+    # Chat
+    st.subheader("RAG Chatbot")
+    query = st.text_area("New ticket", height=140, placeholder="Describe the problem as if opening a ticket")
+    run_chat = st.button("Search and answer")
+
+    if run_chat:
+        if not query.strip():
+            st.error("Enter the ticket text")
+        elif not st.session_state.get("vector"):
+            ok, _, _ = open_vector_in_session(persist_dir, collection_name)
+            if not ok:
+                st.error("Open or create a valid collection in the sidebar")
+        else:
+            try:
+                if st.session_state.get("embedder") is None:
+                    use_openai_embeddings = (emb_backend == "OpenAI")
+                    st.session_state["embedder"] = EmbeddingBackend(
+                        use_openai=use_openai_embeddings,
+                        model_name=emb_model_name
+                    )
+
+                # Warn if the current model differs from the one used for indexing
+                try:
+                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+                    if os.path.exists(meta_path):
+                        with open(meta_path, "r", encoding="utf-8") as f:
+                            m = json.load(f)
+                        if (m.get("provider") != st.session_state["embedder"].provider_name) or \
+                        (m.get("model") != st.session_state["embedder"].model_name):
+                            st.info(
+                                f"Note: the collection was indexed with {m.get('provider')} / {m.get('model')}; "
+                                f"you are querying with {st.session_state['embedder'].provider_name} / "
+                                f"{st.session_state['embedder'].model_name}."
+                            )
+                except Exception:
+                    pass
+
+                # Retrieval
+                q_emb = st.session_state["embedder"].embed([query])
+
+                # 1) KB
+                top_k = int(st.session_state.get("top_k", 5))
+                show_distances = bool(st.session_state.get("show_distances", False))
+                kb_res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=top_k)
+                kb_docs  = kb_res.get("documents", [[]])[0]
+                kb_metas = kb_res.get("metadatas", [[]])[0]
+                kb_dists = kb_res.get("distances", [[]])[0]
+
+                max_distance = float(st.session_state.get("max_distance", prefs.get("max_distance", 0.9)))
+                DIST_MAX_KB = max_distance
+                kb_retrieved = [
+                    (doc, meta, dist, "KB")
+                    for doc, meta, dist in zip(kb_docs, kb_metas, kb_dists)
+                    if dist is not None and dist <= DIST_MAX_KB
+                ]
+
+                # 2) MEMORIES (if enabled)
+                mem_retrieved = []
+                if st.session_state.get("enable_memory", False):
+                    try:
+                        _client = get_chroma_client(persist_dir)
+                        _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+                        mem_res = _mem.query(query_embeddings=q_emb, n_results=min(5, top_k))
+                        mem_docs  = mem_res.get("documents", [[]])[0]
+                        mem_metas = mem_res.get("metadatas", [[]])[0]
+                        mem_dists = mem_res.get("distances", [[]])[0]
+
+                        DIST_MAX_MEM = DIST_MAX_KB
+                        now = now_ts()
+                        for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
+                            if dist is None:
+                                continue
+                            meta = meta or {}
+                            exp = int(meta.get("expires_at", 0))
+                            if exp and exp < now:
+                                continue
+                            if dist <= DIST_MAX_MEM:
+                                mem_retrieved.append((doc, meta, dist, "MEM"))
+                    except Exception:
+                        pass  # memory is optional
+
+                # 3) Merge: max 2 mem, then KB up to top_k
+                mem_cap = 2
+                merged = sorted(mem_retrieved, key=lambda x: x[2])[:mem_cap] + \
+                        sorted(kb_retrieved, key=lambda x: x[2])[:max(0, top_k - min(mem_cap, len(mem_retrieved)))]
+
+                # 4) Prompt
+
+                if merged:
+
+                    # Collapse duplicates by ticket for DISPLAY
+
+                    merged_collapsed_view = collapse_by_parent(
+
+                        merged,
+
+                        per_parent=int(st.session_state.get("per_parent_display", 1)),
+
+                        stitch_for_prompt=False,
+
+                    )
+
+
+                    # Collapse and stitch for PROMPT context
+
+                    merged_for_prompt = collapse_by_parent(
+
+                        merged,
+
+                        per_parent=int(st.session_state.get("per_parent_prompt", 3)),
+
+                        stitch_for_prompt=True,
+
+                        max_chars=int(st.session_state.get("stitch_max_chars", 1500)),
+
+                    )
+
+
+                    retrieved_for_prompt = [(doc, meta, dist) for (doc, meta, dist, _src) in merged_for_prompt]
+
+                    prompt = build_prompt(query, retrieved_for_prompt)
+
+                else:
+
+                    merged_collapsed_view = []
+
+                    prompt = f"New ticket:\n{query.strip()}\n\nNo similar ticket was found in the knowledge base."
+
+                st.write(f"DEBUG: view={len(merged_collapsed_view)}, prompt_ctx={len(merged_for_prompt) if merged else 0}")
+
+                if st.session_state.get("show_prompt", False):
+                    with st.expander("Prompt sent to the LLM", expanded=False):
+                        st.code(prompt, language="markdown")
+
+                # LLM
+                _model = (llm_model or "").strip()
+                if not _model:
+                    raise RuntimeError("LLM model not set: select a valid model in the sidebar.")
+
+                llm = LLMBackend(llm_provider, _model, temperature=llm_temperature)
+                with st.spinner("Generating answer..."):
+                    answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
+                st.write(answer)
+                # store the last Q/A for saving outside the if run_chat
+                st.session_state["last_query"] = query
+                st.session_state["last_answer"] = answer
+
+                # 5) Similar results with provenance
+                if merged:
+                    base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
+                    st.write("Similar results (top-k, with provenance):")
+                    for (doc, meta, dist, src) in merged_collapsed_view:
+                        if src == "KB":
+                            idr = meta.get("id_readable", "")
+                            summary = meta.get("summary", "")
+                            url = f"{base_url}/issue/{idr}" if base_url and idr else ""
+
+
+                            cid = meta.get("chunk_id")
+                            cpos = meta.get("pos")
+                            extra = f" · chunk {cid} @tok {cpos}" if cid else " · document"
+                            if url:
+                                if st.session_state.get("show_distances", False):
+                                    st.markdown(f"- [KB] [{idr}]({url}) — distance={dist:.3f}{extra} — {summary}")
+                                else:
+                                    st.markdown(f"- [KB] [{idr}]({url}){extra} — {summary}")
+                            else:
+                                if st.session_state.get("show_distances", False):
+                                    st.write(f"- [KB] {idr} — distance={dist:.3f}{extra} — {summary}")
+                                else:
+                                    st.write(f"- [KB] {idr}{extra} — {summary}")
+
+                        else:  # MEM
+                            # single-line preview, no nested bullets
+                            preview = one_line_preview(doc, maxlen=160)
+                            proj = meta.get("project", "")
+                            raw_tags = meta.get("tags", "")
+                            tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
+                            extra = f" (tags: {tags})" if tags else (f" (proj: {proj})" if proj else "")
+                            if st.session_state.get("show_distances", False):
+                                st.markdown(f"- [MEM]{extra} — distance={dist:.3f} — {preview}")
+                            else:
+                                st.markdown(f"- [MEM]{extra} — {preview}")
+
+                            # Optional expander with full text
+                            if st.session_state.get("mem_show_full", False):
+                                with st.expander("Full playbook [MEM]", expanded=False):
+                                    # the playbook may contain markdown bullets; render as markdown
+                                    st.markdown(doc)
+
+                else:
+                    st.caption("No sufficiently similar result (below threshold).")
+
+            except Exception as e:
+                st.error(f"Chat error: {e}")
+    # --- Persistent button to save the playbook (outside the if run_chat) ---
+    if st.session_state.get("enable_memory", False) and st.session_state.get("last_answer"):
+        st.markdown("---")
+        if st.button("✅ Mark as solved → Save as playbook"):
+            try:
+                query  = st.session_state.get("last_query", "") or ""
+                answer = st.session_state.get("last_answer", "") or ""
+                condense_prompt = (
+                    "Summarize the solution in 3–6 imperative, reusable sentences, avoiding sensitive data.\n"
+                    f"- Query: {query.strip()}\n- Risposta:\n{answer}\n\n"
+                    "Output: bulleted list of clear steps."
+                )
+                # use the model already validated in chat
+                _model = (st.session_state.get("llm_model") or "").strip()
+                if not _model:
+                    _model = DEFAULT_LLM_MODEL if st.session_state.get("last_llm_provider","OpenAI") == "OpenAI" else DEFAULT_OLLAMA_MODEL
+
+                try:
+                    llm_mem = LLMBackend(llm_provider, _model, temperature=max(0.1, llm_temperature - 0.1))
+                    playbook_text = llm_mem.generate(
+                        "You are an assistant who distills reusable mini-playbooks.",
+                        condense_prompt
+                    ).strip()
+                except Exception:
+                    playbook_text = (answer[:800] + "…") if len(answer) > 800 else answer
+
+                if not playbook_text.strip():
+                    st.warning("No content to save.")
+                else:
+                    curr_proj = st.session_state.get("last_project_key") or ""
+                    tags_list = ["playbook"] + ([curr_proj] if curr_proj else [])
+
+                    meta = {
+                        "source": "memory",
+                        "project": curr_proj,
+                        "quality": "verified",
+                        "created_at": now_ts(),
+                        "expires_at": ts_in_days(st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)),
+                        "tags": ",".join(tags_list),  # <-- CSV instead of list
+                    }
+
+                    if st.session_state.get("embedder") is None:
+                        use_openai_embeddings = (emb_backend == "OpenAI")
+                        st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
+                    mem_emb = st.session_state["embedder"].embed([playbook_text])[0]
+
+                    _client = get_chroma_client(persist_dir)
+                    _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+                    mem_id = f"mem::{uuid.uuid4().hex[:12]}"
+                    _mem.add(ids=[mem_id], documents=[playbook_text], metadatas=[meta], embeddings=[mem_emb])
+
+                    st.caption(f"Saved playbook in path='{persist_dir}', collection='{MEM_COLLECTION}'")
+                    st.success("Playbook saved in memory.")
+                    st.session_state["open_memories_after_save"] = True
+                    st.rerun()                                  # refresh table
+            except Exception as e:
+                st.error(f"Errore salvataggio playbook: {e}")
+
 # ------------------------------
 # Main Streamlit UI
 # ------------------------------
@@ -1300,6 +1612,10 @@ def run_streamlit_app():
     if phase == "LLM & API keys":
         render_phase_llm_page(prefs)
 
+    # Phase 5 – Chat & Results (page)
+    if phase == "Chat & Results":
+        render_phase_chat_page(prefs)
+
     with st.sidebar:
         # --- Wizard-style navigation (visual only, all sections still visible) ---
         PHASES = [
@@ -1308,7 +1624,7 @@ def run_streamlit_app():
             "Embeddings & Vector DB",
             "Retrieval configuration",
             "LLM & API keys",
-            "Chat & results",
+            "Chat & Results",
             "Solutions memory",
             "Preferences & debug",
         ]
@@ -1379,6 +1695,15 @@ def run_streamlit_app():
 
         def _yes(v: bool) -> str:
             return "✅" if bool(v) else "✖️"
+
+        st.markdown("---")
+        st.markdown("### Chat status")
+
+        last_query = st.session_state.get("last_query", "").strip()
+        if last_query:
+            st.caption(f"Last query: {last_query[:50]}{'…' if len(last_query) > 50 else ''}")
+        else:
+            st.caption("No query asked yet.")
 
         # Gather values from session/prefs
         _top_k   = int(st.session_state.get("top_k", 5))
@@ -1889,259 +2214,6 @@ def run_streamlit_app():
                 st.success(f"Indexing completed. Total {'chunks' if enable_chunking else 'documents'}: {st.session_state['vs_count']}")
             except Exception as e:
                 st.error(f"Indexing error: {e}")
-
-    # Chat
-    st.subheader("RAG Chatbot")
-    query = st.text_area("New ticket", height=140, placeholder="Describe the problem as if opening a ticket")
-    run_chat = st.button("Search and answer")
-
-    if run_chat:
-        if not query.strip():
-            st.error("Enter the ticket text")
-        elif not st.session_state.get("vector"):
-            ok, _, _ = open_vector_in_session(persist_dir, collection_name)
-            if not ok:
-                st.error("Open or create a valid collection in the sidebar")
-        else:
-            try:
-                if st.session_state.get("embedder") is None:
-                    use_openai_embeddings = (emb_backend == "OpenAI")
-                    st.session_state["embedder"] = EmbeddingBackend(
-                        use_openai=use_openai_embeddings,
-                        model_name=emb_model_name
-                    )
-
-                # Warn if the current model differs from the one used for indexing
-                try:
-                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
-                    if os.path.exists(meta_path):
-                        with open(meta_path, "r", encoding="utf-8") as f:
-                            m = json.load(f)
-                        if (m.get("provider") != st.session_state["embedder"].provider_name) or \
-                        (m.get("model") != st.session_state["embedder"].model_name):
-                            st.info(
-                                f"Note: the collection was indexed with {m.get('provider')} / {m.get('model')}; "
-                                f"you are querying with {st.session_state['embedder'].provider_name} / "
-                                f"{st.session_state['embedder'].model_name}."
-                            )
-                except Exception:
-                    pass
-
-                # Retrieval
-                q_emb = st.session_state["embedder"].embed([query])
-
-                # 1) KB
-                top_k = int(st.session_state.get("top_k", 5))
-                show_distances = bool(st.session_state.get("show_distances", False))
-                kb_res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=top_k)
-                kb_docs  = kb_res.get("documents", [[]])[0]
-                kb_metas = kb_res.get("metadatas", [[]])[0]
-                kb_dists = kb_res.get("distances", [[]])[0]
-
-                max_distance = float(st.session_state.get("max_distance", prefs.get("max_distance", 0.9)))
-                DIST_MAX_KB = max_distance
-                kb_retrieved = [
-                    (doc, meta, dist, "KB")
-                    for doc, meta, dist in zip(kb_docs, kb_metas, kb_dists)
-                    if dist is not None and dist <= DIST_MAX_KB
-                ]
-
-                # 2) MEMORIES (if enabled)
-                mem_retrieved = []
-                if st.session_state.get("enable_memory", False):
-                    try:
-                        _client = get_chroma_client(persist_dir)
-                        _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
-                        mem_res = _mem.query(query_embeddings=q_emb, n_results=min(5, top_k))
-                        mem_docs  = mem_res.get("documents", [[]])[0]
-                        mem_metas = mem_res.get("metadatas", [[]])[0]
-                        mem_dists = mem_res.get("distances", [[]])[0]
-
-                        DIST_MAX_MEM = DIST_MAX_KB
-                        now = now_ts()
-                        for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
-                            if dist is None:
-                                continue
-                            meta = meta or {}
-                            exp = int(meta.get("expires_at", 0))
-                            if exp and exp < now:
-                                continue
-                            if dist <= DIST_MAX_MEM:
-                                mem_retrieved.append((doc, meta, dist, "MEM"))
-                    except Exception:
-                        pass  # memory is optional
-
-                # 3) Merge: max 2 mem, then KB up to top_k
-                mem_cap = 2
-                merged = sorted(mem_retrieved, key=lambda x: x[2])[:mem_cap] + \
-                        sorted(kb_retrieved, key=lambda x: x[2])[:max(0, top_k - min(mem_cap, len(mem_retrieved)))]
-
-                # 4) Prompt
-
-                if merged:
-
-                    # Collapse duplicates by ticket for DISPLAY
-
-                    merged_collapsed_view = collapse_by_parent(
-
-                        merged,
-
-                        per_parent=int(st.session_state.get("per_parent_display", 1)),
-
-                        stitch_for_prompt=False,
-
-                    )
-
-
-                    # Collapse and stitch for PROMPT context
-
-                    merged_for_prompt = collapse_by_parent(
-
-                        merged,
-
-                        per_parent=int(st.session_state.get("per_parent_prompt", 3)),
-
-                        stitch_for_prompt=True,
-
-                        max_chars=int(st.session_state.get("stitch_max_chars", 1500)),
-
-                    )
-
-
-                    retrieved_for_prompt = [(doc, meta, dist) for (doc, meta, dist, _src) in merged_for_prompt]
-
-                    prompt = build_prompt(query, retrieved_for_prompt)
-
-                else:
-
-                    merged_collapsed_view = []
-
-                    prompt = f"New ticket:\n{{query.strip()}}\n\nNo similar ticket was found in the knowledge base."
-
-                st.write(f"DEBUG: view={len(merged_collapsed_view)}, prompt_ctx={len(merged_for_prompt) if merged else 0}")
-
-                if st.session_state.get("show_prompt", False):
-                    with st.expander("Prompt sent to the LLM", expanded=False):
-                        st.code(prompt, language="markdown")
-
-                # LLM
-                _model = (llm_model or "").strip()
-                if not _model:
-                    raise RuntimeError("LLM model not set: select a valid model in the sidebar.")
-
-                llm = LLMBackend(llm_provider, _model, temperature=llm_temperature)
-                with st.spinner("Generating answer..."):
-                    answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
-                st.write(answer)
-                # store the last Q/A for saving outside the if run_chat
-                st.session_state["last_query"] = query
-                st.session_state["last_answer"] = answer
-
-                # 5) Similar results with provenance
-                if merged:
-                    base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
-                    st.write("Similar results (top-k, with provenance):")
-                    for (doc, meta, dist, src) in merged_collapsed_view:
-                        if src == "KB":
-                            idr = meta.get("id_readable", "")
-                            summary = meta.get("summary", "")
-                            url = f"{base_url}/issue/{idr}" if base_url and idr else ""
-
-
-                            cid = meta.get("chunk_id")
-                            cpos = meta.get("pos")
-                            extra = f" · chunk {cid} @tok {cpos}" if cid else " · document"
-                            if url:
-                                if st.session_state.get("show_distances", False):
-                                    st.markdown(f"- [KB] [{idr}]({url}) — distance={dist:.3f}{extra} — {summary}")
-                                else:
-                                    st.markdown(f"- [KB] [{idr}]({url}){extra} — {summary}")
-                            else:
-                                if st.session_state.get("show_distances", False):
-                                    st.write(f"- [KB] {idr} — distance={dist:.3f}{extra} — {summary}")
-                                else:
-                                    st.write(f"- [KB] {idr}{extra} — {summary}")
-
-                        else:  # MEM
-                            # single-line preview, no nested bullets
-                            preview = one_line_preview(doc, maxlen=160)
-                            proj = meta.get("project", "")
-                            raw_tags = meta.get("tags", "")
-                            tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
-                            extra = f" (tags: {tags})" if tags else (f" (proj: {proj})" if proj else "")
-                            if st.session_state.get("show_distances", False):
-                                st.markdown(f"- [MEM]{extra} — distance={dist:.3f} — {preview}")
-                            else:
-                                st.markdown(f"- [MEM]{extra} — {preview}")
-
-                            # Optional expander with full text
-                            if st.session_state.get("mem_show_full", False):
-                                with st.expander("Full playbook [MEM]", expanded=False):
-                                    # the playbook may contain markdown bullets; render as markdown
-                                    st.markdown(doc)
-
-                else:
-                    st.caption("No sufficiently similar result (below threshold).")
-
-            except Exception as e:
-                st.error(f"Chat error: {e}")
-    # --- Persistent button to save the playbook (outside the if run_chat) ---
-    if st.session_state.get("enable_memory", False) and st.session_state.get("last_answer"):
-        st.markdown("---")
-        if st.button("✅ Mark as solved → Save as playbook"):
-            try:
-                query  = st.session_state.get("last_query", "") or ""
-                answer = st.session_state.get("last_answer", "") or ""
-                condense_prompt = (
-                    "Summarize the solution in 3–6 imperative, reusable sentences, avoiding sensitive data.\n"
-                    f"- Query: {query.strip()}\n- Risposta:\n{answer}\n\n"
-                    "Output: bulleted list of clear steps."
-                )
-                # use the model already validated in chat
-                _model = (st.session_state.get("llm_model") or "").strip()
-                if not _model:
-                    _model = DEFAULT_LLM_MODEL if st.session_state.get("last_llm_provider","OpenAI") == "OpenAI" else DEFAULT_OLLAMA_MODEL
-
-                try:
-                    llm_mem = LLMBackend(llm_provider, _model, temperature=max(0.1, llm_temperature - 0.1))
-                    playbook_text = llm_mem.generate(
-                        "You are an assistant who distills reusable mini-playbooks.",
-                        condense_prompt
-                    ).strip()
-                except Exception:
-                    playbook_text = (answer[:800] + "…") if len(answer) > 800 else answer
-
-                if not playbook_text.strip():
-                    st.warning("No content to save.")
-                else:
-                    curr_proj = st.session_state.get("last_project_key") or ""
-                    tags_list = ["playbook"] + ([curr_proj] if curr_proj else [])
-
-                    meta = {
-                        "source": "memory",
-                        "project": curr_proj,
-                        "quality": "verified",
-                        "created_at": now_ts(),
-                        "expires_at": ts_in_days(st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)),
-                        "tags": ",".join(tags_list),  # <-- CSV instead of list
-                    }
-
-                    if st.session_state.get("embedder") is None:
-                        use_openai_embeddings = (emb_backend == "OpenAI")
-                        st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
-                    mem_emb = st.session_state["embedder"].embed([playbook_text])[0]
-
-                    _client = get_chroma_client(persist_dir)
-                    _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
-                    mem_id = f"mem::{uuid.uuid4().hex[:12]}"
-                    _mem.add(ids=[mem_id], documents=[playbook_text], metadatas=[meta], embeddings=[mem_emb])
-
-                    st.caption(f"Saved playbook in path='{persist_dir}', collection='{MEM_COLLECTION}'")
-                    st.success("Playbook saved in memory.")
-                    st.session_state["open_memories_after_save"] = True
-                    st.rerun()                                  # refresh table
-            except Exception as e:
-                st.error(f"Errore salvataggio playbook: {e}")
 
 # ------------------------------
 # CLI + Self-tests (optional)
