@@ -1802,6 +1802,123 @@ def render_phase_solutions_memory_page(prefs):
         except Exception as e:
             st.error(f"Error reading memories: {e}")
 
+def render_phase_preferences_debug_page(prefs):
+    st.title("Phase 7 – Preferences & debug")
+    st.write(
+        "Preferences handling and Debug settings"
+    )
+    st.subheader("Preferences")
+
+    # Normalize prefs to a dict
+    if isinstance(prefs, dict):
+        prefs_dict = prefs
+    else:
+        prefs_dict = st.session_state.get("prefs", {})
+
+    prefs_enabled = st.checkbox("Enable preferences memory (local)", value=True, help="Save non-sensitive settings in .app_prefs.json")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Save preferences"):
+            if prefs_enabled:
+                try:
+                    # --- Provider coercion: if Ollama not available, force OpenAI ---
+                    _provider_for_save = st.session_state.get("last_llm_provider") or \
+                        st.session_state.get("llm_provider_select") or prefs_dict.get("llm_provider", "OpenAI")
+
+                    # Local Ollama availability check (do not rely on UI-phase variable)
+                    if IS_CLOUD:
+                        _ollama_ok = False
+                    else:
+                        _ollama_ok, _ = is_ollama_available()
+                    if not _ollama_ok and _provider_for_save == "Ollama (local)":
+                        _provider_for_save = "OpenAI"
+
+                    # --- LLM model: never empty and consistent with provider ---
+                    _model_for_save = (st.session_state.get("llm_model") or "").strip()
+                    if not _model_for_save:
+                        _model_for_save = DEFAULT_LLM_MODEL if _provider_for_save == "OpenAI" else DEFAULT_OLLAMA_MODEL
+
+                    # --- Read current UI values or session defaults ---
+                    yt_url = st.session_state.get("yt_url", prefs.get("yt_url", ""))
+                    persist_dir = st.session_state.get("persist_dir", prefs.get("persist_dir", ""))
+
+                    emb_backend = st.session_state.get("emb_provider_select", prefs.get("emb_backend", "OpenAI"))
+                    emb_model_name = st.session_state.get("emb_model", prefs.get("emb_model_name", "text-embedding-3-small"))
+
+                    llm_temperature = st.session_state.get("llm_temperature", prefs.get("llm_temperature", 0.2))
+                    max_distance = st.session_state.get("max_distance", prefs.get("max_distance", 0.9))
+                    show_prompt = st.session_state.get("show_prompt", prefs.get("show_prompt", True))
+                    collection_selected = st.session_state.get("collection_selected", prefs.get("collection_selected"))
+                    new_collection_name = st.session_state.get("new_collection_name_input", prefs.get("new_collection_name", "tickets"))
+
+                    # --- Chunking ---
+                    enable_chunking = bool(st.session_state.get("enable_chunking", prefs.get("enable_chunking", True)))
+                    chunk_size = int(st.session_state.get("chunk_size", prefs.get("chunk_size", 800)))
+                    chunk_overlap = int(st.session_state.get("chunk_overlap", prefs.get("chunk_overlap", 80)))
+                    chunk_min = int(st.session_state.get("chunk_min", prefs.get("chunk_min", 512)))
+
+                    # --- Advanced settings ---
+                    show_distances = bool(st.session_state.get("adv_show_distances", prefs.get("show_distances", False)))
+                    top_k = int(st.session_state.get("adv_top_k", prefs.get("top_k", 5)))
+                    collapse_duplicates = bool(st.session_state.get("adv_collapse_duplicates", prefs.get("collapse_duplicates", True)))
+                    per_parent_display = int(st.session_state.get("adv_per_parent_display", prefs.get("per_parent_display", 1)))
+                    per_parent_prompt = int(st.session_state.get("adv_per_parent_prompt", prefs.get("per_parent_prompt", 3)))
+                    stitch_max_chars = int(st.session_state.get("adv_stitch_max_chars", prefs.get("stitch_max_chars", 1500)))
+
+                    # --- Save all prefs ---
+                    new_prefs = {
+                        "yt_url": yt_url,
+                        "persist_dir": persist_dir,
+                        "emb_backend": emb_backend,
+                        "emb_model_name": emb_model_name,
+                        "llm_provider": _provider_for_save,
+                        "llm_model": _model_for_save,
+                        "llm_temperature": llm_temperature,
+                        "max_distance": max_distance,
+                        "show_prompt": show_prompt,
+                        "collection_selected": collection_selected,
+                        "new_collection_name": new_collection_name,
+                        "enable_chunking": enable_chunking,
+                        "chunk_size": chunk_size,
+                        "chunk_overlap": chunk_overlap,
+                        "chunk_min": chunk_min,
+                        "show_distances": show_distances,
+                        "top_k": top_k,
+                        "collapse_duplicates": collapse_duplicates,
+                        "per_parent_display": per_parent_display,
+                        "per_parent_prompt": per_parent_prompt,
+                        "stitch_max_chars": stitch_max_chars,
+                    }
+
+                    save_prefs(new_prefs)
+                    st.session_state["prefs"] = load_prefs()
+                    st.success("Preferences salvate.")
+                    st.toast("Saved to .app_prefs.json", icon="✅")
+
+                except Exception as e:
+                    import traceback, textwrap
+                    st.error(f"Errore durante il salvataggio: {e}")
+                    st.code(textwrap.dedent(traceback.format_exc()))
+            else:
+                st.info("Preferences memory disabled.")
+
+    with c2:
+        if st.button("Restore defaults"):
+            try:
+                if os.path.exists(PREFS_PATH):
+                    os.remove(PREFS_PATH)
+                st.session_state["prefs"] = {}
+                st.success("Preferences restored. Reload the page to see the defaults.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error while restoring: {e}")
+
+    st.header("Debug")
+    if "show_prompt" not in st.session_state:
+        st.session_state["show_prompt"] = bool(prefs.get("show_prompt", False))
+    show_prompt = st.checkbox("Show LLM prompt", value=st.session_state["show_prompt"])
+    st.session_state["show_prompt"] = show_prompt
+
 # ------------------------------
 # Main Streamlit UI
 # ------------------------------
@@ -1911,9 +2028,13 @@ def run_streamlit_app():
     if phase == "Chat & Results":
         render_phase_chat_page(prefs)
 
-    # Phase 6 - Solutions memory
+    # Phase 6 - Solutions memory (page)
     if phase == "Solutions memory":
         render_phase_solutions_memory_page(prefs)
+
+    # Phase 7 - Preferences and debug (page)
+    if phase == "Preferences & debug":
+        render_phase_preferences_debug_page(prefs)
 
     with st.sidebar:
         # --- Wizard-style navigation (visual only, all sections still visible) ---
@@ -1940,7 +2061,7 @@ def run_streamlit_app():
             "Current phase",
             options=PHASES,
             key="ui_phase_choice",
-            help="This is only a visual wizard for now: all sidebar sections remain visible.",
+            help="This is only a visual wizard for now.",
         )
 
         if isinstance(current_phase, str):
@@ -2091,111 +2212,8 @@ def run_streamlit_app():
         else:
             st.caption("No index metadata available. Consider reindexing to record provider/model.")
 
-        st.header("Debug")
-        if "show_prompt" not in st.session_state:
-            st.session_state["show_prompt"] = bool(prefs.get("show_prompt", False))
-        show_prompt = st.checkbox("Show LLM prompt", value=st.session_state["show_prompt"])
-        st.session_state["show_prompt"] = show_prompt
-
         st.markdown("---")
-        st.subheader("Preferences")
-        prefs_enabled = st.checkbox("Enable preferences memory (local)", value=True, help="Save non-sensitive settings in .app_prefs.json")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Save preferences"):
-                if prefs_enabled:
-                    try:
-                        # --- Provider coercion: if Ollama not available, force OpenAI ---
-                        _provider_for_save = st.session_state.get("last_llm_provider", llm_provider)
-                        # Local Ollama availability check (do not rely on UI-phase variable)
-                        if IS_CLOUD:
-                            _ollama_ok = False
-                        else:
-                            _ollama_ok, _ = is_ollama_available()
-                        if not _ollama_ok and _provider_for_save == "Ollama (local)":
-                            _provider_for_save = "OpenAI"
-
-                        # --- LLM model: never empty and consistent with provider ---
-                        _model_for_save = (st.session_state.get("llm_model") or "").strip()
-                        if not _model_for_save:
-                            _model_for_save = DEFAULT_LLM_MODEL if _provider_for_save == "OpenAI" else DEFAULT_OLLAMA_MODEL
-
-                        # --- Read current UI values or session defaults ---
-                        yt_url = st.session_state.get("yt_url", prefs.get("yt_url", ""))
-                        persist_dir = st.session_state.get("persist_dir", prefs.get("persist_dir", ""))
-
-                        emb_backend = st.session_state.get("emb_provider_select", prefs.get("emb_backend", "OpenAI"))
-                        emb_model_name = st.session_state.get("emb_model", prefs.get("emb_model_name", "text-embedding-3-small"))
-
-                        llm_temperature = st.session_state.get("llm_temperature", prefs.get("llm_temperature", 0.2))
-                        max_distance = st.session_state.get("max_distance", prefs.get("max_distance", 0.9))
-                        show_prompt = st.session_state.get("show_prompt", prefs.get("show_prompt", True))
-                        collection_selected = st.session_state.get("collection_selected", prefs.get("collection_selected"))
-                        new_collection_name = st.session_state.get("new_collection_name_input", prefs.get("new_collection_name", "tickets"))
-
-                        # --- Chunking ---
-                        enable_chunking = bool(st.session_state.get("enable_chunking", prefs.get("enable_chunking", True)))
-                        chunk_size = int(st.session_state.get("chunk_size", prefs.get("chunk_size", 800)))
-                        chunk_overlap = int(st.session_state.get("chunk_overlap", prefs.get("chunk_overlap", 80)))
-                        chunk_min = int(st.session_state.get("chunk_min", prefs.get("chunk_min", 512)))
-
-                        # --- Advanced settings ---
-                        show_distances = bool(st.session_state.get("adv_show_distances", prefs.get("show_distances", False)))
-                        top_k = int(st.session_state.get("adv_top_k", prefs.get("top_k", 5)))
-                        collapse_duplicates = bool(st.session_state.get("adv_collapse_duplicates", prefs.get("collapse_duplicates", True)))
-                        per_parent_display = int(st.session_state.get("adv_per_parent_display", prefs.get("per_parent_display", 1)))
-                        per_parent_prompt = int(st.session_state.get("adv_per_parent_prompt", prefs.get("per_parent_prompt", 3)))
-                        stitch_max_chars = int(st.session_state.get("adv_stitch_max_chars", prefs.get("stitch_max_chars", 1500)))
-
-                        # --- Save all prefs ---
-                        new_prefs = {
-                            "yt_url": yt_url,
-                            "persist_dir": persist_dir,
-                            "emb_backend": emb_backend,
-                            "emb_model_name": emb_model_name,
-                            "llm_provider": _provider_for_save,
-                            "llm_model": _model_for_save,
-                            "llm_temperature": llm_temperature,
-                            "max_distance": max_distance,
-                            "show_prompt": show_prompt,
-                            "collection_selected": collection_selected,
-                            "new_collection_name": new_collection_name,
-                            "enable_chunking": enable_chunking,
-                            "chunk_size": chunk_size,
-                            "chunk_overlap": chunk_overlap,
-                            "chunk_min": chunk_min,
-                            "show_distances": show_distances,
-                            "top_k": top_k,
-                            "collapse_duplicates": collapse_duplicates,
-                            "per_parent_display": per_parent_display,
-                            "per_parent_prompt": per_parent_prompt,
-                            "stitch_max_chars": stitch_max_chars,
-                        }
-
-                        save_prefs(new_prefs)
-                        st.session_state["prefs"] = load_prefs()
-                        st.success("Preferences salvate.")
-                        st.toast("Saved to .app_prefs.json", icon="✅")
-
-                    except Exception as e:
-                        import traceback, textwrap
-                        st.error(f"Errore durante il salvataggio: {e}")
-                        st.code(textwrap.dedent(traceback.format_exc()))
-                else:
-                    st.info("Preferences memory disabled.")
-
-        with c2:
-            if st.button("Restore defaults"):
-                try:
-                    if os.path.exists(PREFS_PATH):
-                        os.remove(PREFS_PATH)
-                    st.session_state["prefs"] = {}
-                    st.success("Preferences restored. Reload the page to see the defaults.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error while restoring: {e}")
-
-        st.markdown("---")
+        
         if not IS_CLOUD:
             quit_btn = st.button("Quit", use_container_width=True)
             if quit_btn:
