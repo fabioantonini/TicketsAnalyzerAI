@@ -101,7 +101,21 @@ NON_SENSITIVE_PREF_KEYS = {
     "max_distance",
     "show_prompt",
     "collection_selected",
-    "new_collection_name", "enable_chunking", "chunk_size", "chunk_overlap", "chunk_min", "show_distances", "top_k", "collapse_duplicates", "per_parent_display", "per_parent_prompt", "stitch_max_chars"}
+    "new_collection_name", 
+    "enable_chunking", 
+    "chunk_size", 
+    "chunk_overlap", 
+    "chunk_min", 
+    "show_distances", 
+    "top_k", 
+    "collapse_duplicates", 
+    "per_parent_display", 
+    "per_parent_prompt", 
+    "stitch_max_chars",
+    "enable_memory",
+    "mem_ttl_days",
+    "mem_show_full"
+    }
 
 def load_prefs() -> dict:
     try:
@@ -1716,15 +1730,24 @@ def render_phase_solutions_memory_page(prefs):
         key="mem_show_full",
         help="If enabled, an expander with the full playbook appears under each MEM result."
     )
-    enable_memory = st.checkbox("Enable 'playbook' memory (separate collection)",
-        value=st.session_state.get("enable_memory", False),
+    enable_memory = st.checkbox(
+        "Enable 'playbook' memory (separate collection)",
+        value=st.session_state.get(
+            "enable_memory",
+            prefs_dict.get("enable_memory", False)
+        ),
         help="When you mark an answer as 'Solved', I save a reusable mini-playbook."
     )
     st.session_state["enable_memory"] = enable_memory
 
-    mem_ttl_days = st.number_input("TTL (days) for playbooks",
+    mem_ttl_days = st.number_input(
+        "TTL (days) for playbooks",
         min_value=7, max_value=365,
-        value=st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS), step=1
+        value=st.session_state.get(
+            "mem_ttl_days",
+            prefs_dict.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)
+        ),
+        step=1
     )
     st.session_state["mem_ttl_days"] = int(mem_ttl_days)
 
@@ -1746,6 +1769,20 @@ def render_phase_solutions_memory_page(prefs):
                 st.success("Memories deleted.")
             except Exception as e:
                 st.error(f"Error deleting memories: {e}")
+
+    st.markdown("---")
+    if st.button("Save memory settings"):
+        try:
+            prefs_dict["enable_memory"] = bool(st.session_state["enable_memory"])
+            prefs_dict["mem_ttl_days"] = int(st.session_state["mem_ttl_days"])
+            prefs_dict["mem_show_full"] = bool(st.session_state.get("mem_show_full", False))
+
+            st.session_state["prefs"] = prefs_dict
+            save_prefs(prefs_dict)
+
+            st.success("Memory settings saved.")
+        except Exception as e:
+            st.error(f"Error saving preferences: {e}")
 
     # Main: show the table only if active
     if st.session_state.get("show_memories"):
