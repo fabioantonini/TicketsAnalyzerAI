@@ -114,7 +114,8 @@ NON_SENSITIVE_PREF_KEYS = {
     "stitch_max_chars",
     "enable_memory",
     "mem_ttl_days",
-    "mem_show_full"
+    "mem_show_full",
+    "show_memories"
     }
 
 def load_prefs() -> dict:
@@ -1703,11 +1704,9 @@ def render_phase_chat_page(prefs):
                 st.error(f"Errore salvataggio playbook: {e}")
 
 def render_phase_solutions_memory_page(prefs):
-    import streamlit as st
-
-    # Normalize prefs to a dict
+    # --- Prefs: dai priorità a quelli in session_state (possono essere più recenti) ---
     if isinstance(prefs, dict):
-        prefs_dict = prefs
+        prefs_dict = st.session_state.get("prefs", prefs)
     else:
         prefs_dict = st.session_state.get("prefs", {})
 
@@ -1717,47 +1716,56 @@ def render_phase_solutions_memory_page(prefs):
         prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR),
     )
 
+    # --- Inizializza una sola volta i valori in session_state dai prefs salvati ---
+    if "enable_memory" not in st.session_state:
+        st.session_state["enable_memory"] = bool(prefs_dict.get("enable_memory", False))
+
+    if "mem_ttl_days" not in st.session_state:
+        st.session_state["mem_ttl_days"] = int(prefs_dict.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS))
+
+    if "mem_show_full" not in st.session_state:
+        st.session_state["mem_show_full"] = bool(prefs_dict.get("mem_show_full", False))
+
+    if "show_memories" not in st.session_state:
+        st.session_state["show_memories"] = bool(prefs_dict.get("show_memories", False))
+
     st.title("Phase 6 – Solutions memory")
     st.write(
         "Review and manage saved playbooks (memories) derived from solved tickets."
     )
 
     st.markdown("---")
-
     st.header("Solutions memory")
 
-    st.checkbox("Show full text of playbooks (MEM)",
+    # Usa solo key=..., i value vengono da session_state (già inizializzato)
+    st.checkbox(
+        "Show full text of playbooks (MEM)",
         key="mem_show_full",
-        help="If enabled, an expander with the full playbook appears under each MEM result."
+        help="If enabled, an expander with the full playbook appears under each MEM result.",
     )
-    enable_memory = st.checkbox(
-        "Enable 'playbook' memory (separate collection)",
-        value=st.session_state.get(
-            "enable_memory",
-            prefs_dict.get("enable_memory", False)
-        ),
-        help="When you mark an answer as 'Solved', I save a reusable mini-playbook."
-    )
-    st.session_state["enable_memory"] = enable_memory
 
-    mem_ttl_days = st.number_input(
-        "TTL (days) for playbooks",
-        min_value=7, max_value=365,
-        value=st.session_state.get(
-            "mem_ttl_days",
-            prefs_dict.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)
-        ),
-        step=1
+    st.checkbox(
+        "Enable 'playbook' memory (separate collection)",
+        key="enable_memory",
+        help="When you mark an answer as 'Solved', I save a reusable mini-playbook.",
     )
-    st.session_state["mem_ttl_days"] = int(mem_ttl_days)
+
+    st.number_input(
+        "TTL (days) for playbooks",
+        min_value=7,
+        max_value=365,
+        step=1,
+        key="mem_ttl_days",
+    )
 
     c_mem1, c_mem2 = st.columns(2)
     with c_mem1:
         if st.session_state.pop("open_memories_after_save", False):
             st.session_state["show_memories"] = True
-        st.checkbox("Show saved playbooks",
+        st.checkbox(
+            "Show saved playbooks",
             key="show_memories",
-            help="Display the list of the 'memories' collection on the main page."
+            help="Display the list of the 'memories' collection on the main page.",
         )
     with c_mem2:
         mem_del_confirm = st.checkbox("Confirm delete memories", value=False)
@@ -1765,45 +1773,41 @@ def render_phase_solutions_memory_page(prefs):
             try:
                 _client = get_chroma_client(persist_dir)
                 _client.delete_collection(name=MEM_COLLECTION)
-                _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+                _client.get_or_create_collection(
+                    name=MEM_COLLECTION,
+                    metadata={"hnsw:space": "cosine"},
+                )
                 st.success("Memories deleted.")
             except Exception as e:
                 st.error(f"Error deleting memories: {e}")
 
     st.markdown("---")
-    if st.button("Save memory settings"):
-        try:
-            prefs_dict["enable_memory"] = bool(st.session_state["enable_memory"])
-            prefs_dict["mem_ttl_days"] = int(st.session_state["mem_ttl_days"])
-            prefs_dict["mem_show_full"] = bool(st.session_state.get("mem_show_full", False))
-
-            st.session_state["prefs"] = prefs_dict
-            save_prefs(prefs_dict)
-
-            st.success("Memory settings saved.")
-        except Exception as e:
-            st.error(f"Error saving preferences: {e}")
 
     # Main: show the table only if active
     if st.session_state.get("show_memories"):
         st.subheader("Saved playbooks (memories)")
         try:
             _client = get_chroma_client(persist_dir)
-            _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+            _mem = _client.get_or_create_collection(
+                name=MEM_COLLECTION,
+                metadata={"hnsw:space": "cosine"},
+            )
 
             total = _mem.count()
-            st.caption(f"Collection: '{MEM_COLLECTION}' — path: {persist_dir} — count: {total}")
+            st.caption(
+                f"Collection: '{MEM_COLLECTION}' — path: {persist_dir} — count: {total}"
+            )
 
             data = _mem.get(include=["documents", "metadatas"], limit=max(200, total))
-            ids   = data.get("ids") or []
-            docs  = data.get("documents") or []
+            ids = data.get("ids") or []
+            docs = data.get("documents") or []
             metas = data.get("metadatas") or []
 
             if total > 0 and not ids:
                 st.warning("La collection riporta count>0 ma get() è vuoto. Riprovo senza include…")
                 data = _mem.get(limit=max(200, total))  # fallback
-                ids   = data.get("ids") or []
-                docs  = data.get("documents") or []
+                ids = data.get("ids") or []
+                docs = data.get("documents") or []
                 metas = data.get("metadatas") or []
 
             if not ids:
@@ -1826,14 +1830,16 @@ def render_phase_solutions_memory_page(prefs):
 
                     prev = (doc[:120] + "…") if doc and len(doc) > 120 else (doc or "")
 
-                    rows.append({
-                        "ID": _id,
-                        "Project": meta.get("project", ""),
-                        "Tags": tags,
-                        "Created": created_s,
-                        "Expires": expires_s,
-                        "Preview": prev,
-                    })
+                    rows.append(
+                        {
+                            "ID": _id,
+                            "Project": meta.get("project", ""),
+                            "Tags": tags,
+                            "Created": created_s,
+                            "Expires": expires_s,
+                            "Preview": prev,
+                        }
+                    )
 
                 st.dataframe(pd.DataFrame(rows), use_container_width=True)
         except Exception as e:
@@ -1902,6 +1908,12 @@ def render_phase_preferences_debug_page(prefs):
                     per_parent_prompt = int(st.session_state.get("adv_per_parent_prompt", prefs.get("per_parent_prompt", 3)))
                     stitch_max_chars = int(st.session_state.get("adv_stitch_max_chars", prefs.get("stitch_max_chars", 1500)))
 
+                    # --- Solutions memory settings ---
+                    enable_memory = bool(st.session_state.get("enable_memory", prefs.get("enable_memory", False)))
+                    mem_ttl_days = int(st.session_state.get("mem_ttl_days", prefs.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)))
+                    mem_show_full = bool(st.session_state.get("mem_show_full", prefs.get("mem_show_full", False)))
+                    show_memories = bool(st.session_state.get("show_memories", prefs.get("show_memories", False)))
+
                     # --- Save all prefs ---
                     new_prefs = {
                         "yt_url": yt_url,
@@ -1925,6 +1937,10 @@ def render_phase_preferences_debug_page(prefs):
                         "per_parent_display": per_parent_display,
                         "per_parent_prompt": per_parent_prompt,
                         "stitch_max_chars": stitch_max_chars,
+                        "enable_memory": enable_memory,
+                        "mem_ttl_days": mem_ttl_days,
+                        "mem_show_full": mem_show_full,
+                        "show_memories": show_memories,
                     }
 
                     save_prefs(new_prefs)
