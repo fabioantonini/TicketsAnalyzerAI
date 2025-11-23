@@ -2213,13 +2213,13 @@ def run_streamlit_app():
             st.caption("No index metadata available. Consider reindexing to record provider/model.")
 
         st.markdown("---")
-        
+        st.caption(f"IS_CLOUD={IS_CLOUD} · ChromaDB dir={st.session_state['prefs'].get('persist_dir', DEFAULT_CHROMA_DIR)}")
+
         if not IS_CLOUD:
             quit_btn = st.button("Quit", use_container_width=True)
             if quit_btn:
                 st.write("Closing application...")
                 os._exit(0)
-        st.caption(f"IS_CLOUD={IS_CLOUD} · ChromaDB dir={st.session_state['prefs'].get('persist_dir', DEFAULT_CHROMA_DIR)}")
 
         # Automatic opening of the selected collection (without re-indexing)
         # Avoid opening if the user has chosen "Create new…" but has not entered a name different from the default
