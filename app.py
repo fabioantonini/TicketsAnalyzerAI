@@ -674,6 +674,63 @@ def render_phase_yt_connection_page(prefs):
 
     connect = st.button("Connect to YouTrack")
 
+        # Projects & issues
+
+    st.subheader("YouTrack Projects")
+    if st.session_state.get("yt_client"):
+        projects = st.session_state.get("projects", [])
+        if projects:
+            names = [f"{p.get('name')} ({p.get('shortName')})" for p in projects]
+            sel = st.selectbox("Choose project", options=["-- select --"] + names, key="proj_select")
+
+            if sel and sel != "-- select --":
+                p = projects[names.index(sel)]
+                project_key = p.get("shortName") or p.get("name")
+
+                # AUTO-LOAD: when the project changes, immediately load the issues
+                prev_key = st.session_state.get("last_project_key")
+                if prev_key != project_key:
+                    try:
+                        with st.spinner("Loading issues..."):
+                            st.session_state["issues"] = st.session_state["yt_client"].list_issues(project_key)
+                        st.session_state["last_project_key"] = project_key
+                        st.success(f"Loaded {len(st.session_state['issues'])} issues")
+                    except Exception as e:
+                        st.error(f"Error loading issues: {e}")
+
+                # optional: button to reload manually
+                if st.button("Reload issues"):
+                    try:
+                        with st.spinner("Reloading issues..."):
+                            st.session_state["issues"] = st.session_state["yt_client"].list_issues(project_key)
+                        st.success(f"Loaded {len(st.session_state['issues'])} issues")
+                    except Exception as e:
+                        st.error(f"Reload error: {e}")
+        else:
+            st.caption("No project found (or insufficient permissions).")
+
+    # ALWAYS show the table if there are issues in memory
+    issues = st.session_state.get("issues", [])
+    if issues:
+        base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
+
+        # Build a Markdown table with clickable ID and without Project/Open
+        lines = []
+        lines.append("| ID | Summary |")
+        lines.append("|---|---|")
+        for it in issues:
+            url = f"{base_url}/issue/{it.id_readable}" if base_url else ""
+            id_cell = f"[{it.id_readable}]({url})" if url else it.id_readable
+            # trim very long summaries (optional)
+            summary = it.summary.strip().replace("\n", " ")
+            if len(summary) > 160:
+                summary = summary[:157] + "..."
+            lines.append(f"| {id_cell} | {summary} |")
+
+        st.markdown("\n".join(lines), unsafe_allow_html=False)
+    else:
+        st.caption("No issues in memory. Select a project to load tickets.")
+
     return yt_url, yt_token, connect
 
 def render_phase_embeddings_vectordb_page(prefs):
@@ -691,11 +748,27 @@ def render_phase_embeddings_vectordb_page(prefs):
         "provider/model used for indexing and query."
     )
 
-    # Small status summary on top
-    current_dir = st.session_state.get("persist_dir", prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR))
-    current_collection = st.session_state.get("vs_collection", "")
-    current_provider = st.session_state.get("emb_provider_select", "OpenAI")
-    current_model = st.session_state.get("emb_model", "")
+    # Small status summary on top (allineato con prefs + session_state)
+    current_dir = (
+        st.session_state.get("persist_dir")
+        or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
+    )
+
+    current_collection = (
+        st.session_state.get("vs_collection")
+        or prefs_dict.get("collection_selected")
+        or prefs_dict.get("new_collection_name", "")
+    )
+
+    current_provider = (
+        st.session_state.get("emb_provider_select")
+        or prefs_dict.get("emb_backend", "OpenAI")
+    )
+
+    current_model = (
+        st.session_state.get("emb_model")
+        or prefs_dict.get("emb_model_name", "")
+    )
 
     st.info(
         f"Current collection: **{current_collection or 'none'}** · "
@@ -746,6 +819,8 @@ def render_phase_embeddings_vectordb_page(prefs):
     last_new = st.session_state.get("new_collection_name_input")
     if not last_new:
         last_new = prefs_dict.get("new_collection_name", DEFAULT_COLLECTION)
+        # initialize session_state once, then the widget will read from here
+        st.session_state["new_collection_name_input"] = last_new
 
     st.caption(f"Selected pref: {prefs_dict.get('collection_selected', '—')}  ·  Path: {persist_dir}")
 
@@ -770,8 +845,9 @@ def render_phase_embeddings_vectordb_page(prefs):
         )
 
         if sel == NEW_LABEL:
-            new_name = st.text_input("New collection name", key="new_collection_name_input", value=last_new)
-            collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION
+            new_name = st.text_input("New collection name", key="new_collection_name_input")
+            st.caption("ℹ️ This collection will be physically created after you run **Index tickets** at least once.")
+            collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION            
             st.session_state["collection_selected"] = NEW_LABEL
             st.session_state["vs_collection"] = collection_name
         else:
@@ -781,99 +857,11 @@ def render_phase_embeddings_vectordb_page(prefs):
             st.session_state["after_delete_reset"] = True
     else:
         st.caption("No collection found. Create a new one:")
-        new_name = st.text_input("New collection", key="new_collection_name_input", value=last_new)
+        new_name = st.text_input("New collection", key="new_collection_name_input")
+        st.caption("ℹ️ This collection will be physically created after you run **Index tickets** at least once.")
         collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION
         st.session_state["collection_selected"] = NEW_LABEL
         st.session_state["vs_collection"] = collection_name
-
-    # -----------------------------
-    # Advanced settings reset (pre-widgets)
-    # -----------------------------
-    if st.session_state.pop("_adv_do_reset", False):
-        _defaults = {
-            # Advanced
-            "adv_show_distances": False,
-            "adv_top_k": 5,
-            "adv_collapse_duplicates": True,
-            "adv_per_parent_display": 1,
-            "adv_per_parent_prompt": 3,
-            "adv_stitch_max_chars": 1500,
-            # Chunking
-            "enable_chunking": True,
-            "chunk_size": 800,
-            "chunk_overlap": 80,
-            "chunk_min": 512,
-        }
-        for _k, _v in _defaults.items():
-            st.session_state[_k] = _v
-        st.session_state["_adv_reset_toast"] = True
-
-    # -----------------------------
-    # Advanced settings (UI)
-    # -----------------------------
-    with st.expander("Advanced settings", expanded=False):
-        show_distances = st.checkbox(
-            "Show distances in results",
-            key="adv_show_distances",
-            help="Display the distance/score next to each retrieved result.",
-        )
-
-        top_k = st.number_input(
-            "Top-K KB results",
-            min_value=1,
-            max_value=50,
-            step=1,
-            key="adv_top_k",
-            help="Number of Knowledge Base results to pass downstream (before collapsing duplicates).",
-        )
-
-        collapse_duplicates = st.checkbox(
-            "Collapse duplicate results by ticket",
-            key="adv_collapse_duplicates",
-            help="Show only one result per ticket in the UI (keeps recall for the prompt context).",
-        )
-
-        per_parent_display = st.number_input(
-            "Max results per ticket (UI)",
-            min_value=1,
-            max_value=10,
-            step=1,
-            key="adv_per_parent_display",
-            help="Maximum number of results displayed for the same ticket in the UI.",
-        )
-
-        per_parent_prompt = st.number_input(
-            "Max chunks per ticket (prompt)",
-            min_value=1,
-            max_value=10,
-            step=1,
-            key="adv_per_parent_prompt",
-            help="Maximum number of chunks concatenated per ticket in the prompt context.",
-        )
-
-        stitch_max_chars = st.number_input(
-            "Stitched context limit (chars)",
-            min_value=200,
-            max_value=20000,
-            step=100,
-            key="adv_stitch_max_chars",
-            help="Character limit when concatenating multiple chunks of the same ticket for the prompt context.",
-        )
-
-        if st.button("Reset to defaults", key="adv_reset_btn"):
-            st.session_state["_adv_do_reset"] = True
-            st.rerun()
-
-    if st.session_state.pop("_adv_reset_toast", False):
-        st.toast("Advanced settings reset to defaults", icon="↩️")
-
-    # Make them available during the current run (for downstream functions)
-    st.session_state["show_distances"] = st.session_state.get("adv_show_distances", False)
-    st.session_state["top_k"] = int(st.session_state.get("adv_top_k", 5))
-    st.session_state["collapse_duplicates"] = st.session_state.get("adv_collapse_duplicates", True)
-    st.session_state["per_parent_display"] = int(st.session_state.get("adv_per_parent_display", 1))
-    st.session_state["per_parent_prompt"] = int(st.session_state.get("adv_per_parent_prompt", 3))
-    st.session_state["stitch_max_chars"] = int(st.session_state.get("adv_stitch_max_chars", 1500))
 
     # -----------------------------
     # Collection management: delete
@@ -889,6 +877,12 @@ def render_phase_embeddings_vectordb_page(prefs):
         disabled=not is_existing_collection,
         help="This operation permanently removes the collection from the datastore.",
     )
+
+    if not is_existing_collection:
+        st.caption(
+            "ℹ️ This collection name is not yet present in Chroma. "
+            "Run **Index tickets** at least once before it can be deleted."
+        )
 
     if st.button(
         "Delete collection",
@@ -1000,6 +994,104 @@ def render_phase_embeddings_vectordb_page(prefs):
         key="emb_model",
     )
 
+    # Ingest
+    st.subheader("Vector DB Indexing")
+    # --- Embeddings backend/model for ingestion, chat and playbooks ---
+    emb_backend = st.session_state.get(
+        "emb_provider_select",
+        prefs.get("emb_backend", "OpenAI"),
+    )
+    emb_model_name = st.session_state.get(
+        "emb_model",
+        prefs.get("emb_model_name", "text-embedding-3-small"),
+    )
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        start_ingest = st.button("Index tickets")
+    with col2:
+        st.caption("Create ticket embeddings and save them to Chroma for semantic retrieval")
+
+    # Read chunking configuration from session_state
+    enable_chunking = bool(st.session_state.get("enable_chunking", True))
+    chunk_size = int(st.session_state.get("chunk_size", 800))
+    chunk_overlap = int(st.session_state.get("chunk_overlap", 80))
+    chunk_min = int(st.session_state.get("chunk_min", 512))
+
+    if start_ingest:
+        issues = st.session_state.get("issues", [])
+        if not issues:
+            st.error("First load the project's tickets")
+        else:
+            try:
+                st.session_state["vector"] = VectorStore(persist_dir=persist_dir, collection_name=collection_name)
+                use_openai_embeddings = (emb_backend == "OpenAI")
+                st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
+                # Save embeddings model metadata for consistency
+                try:
+                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+                    meta = {"provider": st.session_state["embedder"].provider_name, "model": st.session_state["embedder"].model_name}
+                    with open(meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f)
+                except Exception:
+                    pass
+
+                # NEW: chunked indexing with metadata parent_id, chunk_id, pos
+                all_ids = []
+                all_docs = []
+                all_metas = []
+                embed_inputs = []
+
+                for it in issues:
+                    full_text = it.text_blob()
+                    if enable_chunking:
+                        pieces = split_into_chunks(
+                            full_text,
+                            chunk_size=int(chunk_size),
+                            overlap=int(chunk_overlap),
+                            min_size=int(chunk_min),
+                        )
+                    else:
+                        pieces = [(0, full_text)]
+
+                    if not pieces:
+                        pieces = [(0, full_text)]
+
+                    multi = len(pieces) > 1  # true se davvero abbiamo più chunk
+
+                    for idx, (pos0, chunk_text) in enumerate(pieces, start=1):
+                        # usa ID semplice se non stai spezzando
+                        cid = f"{it.id_readable}::c{idx:03d}" if multi else it.id_readable
+
+                        all_ids.append(cid)
+                        all_docs.append(chunk_text)
+
+                        meta = {
+                            "parent_id": it.id_readable,
+                            "id_readable": it.id_readable,
+                            "summary": it.summary,
+                            "project": it.project,
+                        }
+                        if multi:
+                            meta["chunk_id"] = idx          # int
+                            meta["pos"] = int(pos0)         # int
+
+                        all_metas.append(meta)
+                        all_metas = [{k: v for k, v in m.items() if v is not None} for m in all_metas]
+                        embed_inputs.append(f"{it.id_readable} | {it.summary}\n\n{chunk_text}")
+                with st.spinner(f"Computing embeddings for {len(all_ids)} {'chunks' if enable_chunking else 'documents'} and saving to Chroma..."):
+                    embs = st.session_state["embedder"].embed(embed_inputs)
+                    st.session_state["vector"].add(ids=all_ids, documents=all_docs, metadatas=all_metas, embeddings=embs)
+                # update counter
+                st.session_state["vs_persist_dir"] = persist_dir
+                st.session_state["vs_collection"] = collection_name
+                st.session_state["vs_count"] = st.session_state["vector"].count()
+                st.success(f"Indexing completed. Total {'chunks' if enable_chunking else 'documents'}: {st.session_state['vs_count']}")
+                st.session_state["ui_phase_choice"] = "Embeddings & Vector DB"
+                st.rerun()
+            except Exception as e:
+                st.error(f"Indexing error: {e}")
+
 def render_phase_retrieval_page(prefs):
     import streamlit as st
 
@@ -1079,6 +1171,95 @@ def render_phase_retrieval_page(prefs):
         "These settings are used when you run indexing (Phase 2) and when the retriever "
         "filters similar tickets (Phase 6)."
     )
+
+    # -----------------------------
+    # Advanced settings reset (pre-widgets)
+    # -----------------------------
+    if st.session_state.pop("_adv_do_reset", False):
+        _defaults = {
+            # Advanced
+            "adv_show_distances": False,
+            "adv_top_k": 5,
+            "adv_collapse_duplicates": True,
+            "adv_per_parent_display": 1,
+            "adv_per_parent_prompt": 3,
+            "adv_stitch_max_chars": 1500,
+            # Chunking
+            "enable_chunking": True,
+            "chunk_size": 800,
+            "chunk_overlap": 80,
+            "chunk_min": 512,
+        }
+        for _k, _v in _defaults.items():
+            st.session_state[_k] = _v
+        st.session_state["_adv_reset_toast"] = True
+
+    # -----------------------------
+    # Advanced settings (UI)
+    # -----------------------------
+    with st.expander("Advanced settings", expanded=False):
+        show_distances = st.checkbox(
+            "Show distances in results",
+            key="adv_show_distances",
+            help="Display the distance/score next to each retrieved result.",
+        )
+
+        top_k = st.number_input(
+            "Top-K KB results",
+            min_value=1,
+            max_value=50,
+            step=1,
+            key="adv_top_k",
+            help="Number of Knowledge Base results to pass downstream (before collapsing duplicates).",
+        )
+
+        collapse_duplicates = st.checkbox(
+            "Collapse duplicate results by ticket",
+            key="adv_collapse_duplicates",
+            help="Show only one result per ticket in the UI (keeps recall for the prompt context).",
+        )
+
+        per_parent_display = st.number_input(
+            "Max results per ticket (UI)",
+            min_value=1,
+            max_value=10,
+            step=1,
+            key="adv_per_parent_display",
+            help="Maximum number of results displayed for the same ticket in the UI.",
+        )
+
+        per_parent_prompt = st.number_input(
+            "Max chunks per ticket (prompt)",
+            min_value=1,
+            max_value=10,
+            step=1,
+            key="adv_per_parent_prompt",
+            help="Maximum number of chunks concatenated per ticket in the prompt context.",
+        )
+
+        stitch_max_chars = st.number_input(
+            "Stitched context limit (chars)",
+            min_value=200,
+            max_value=20000,
+            step=100,
+            key="adv_stitch_max_chars",
+            help="Character limit when concatenating multiple chunks of the same ticket for the prompt context.",
+        )
+
+        if st.button("Reset to defaults", key="adv_reset_btn"):
+            st.session_state["_adv_do_reset"] = True
+            st.rerun()
+
+    if st.session_state.pop("_adv_reset_toast", False):
+        st.toast("Advanced settings reset to defaults", icon="↩️")
+
+    # Make them available during the current run (for downstream functions)
+    st.session_state["show_distances"] = st.session_state.get("adv_show_distances", False)
+    st.session_state["top_k"] = int(st.session_state.get("adv_top_k", 5))
+    st.session_state["collapse_duplicates"] = st.session_state.get("adv_collapse_duplicates", True)
+    st.session_state["per_parent_display"] = int(st.session_state.get("adv_per_parent_display", 1))
+    st.session_state["per_parent_prompt"] = int(st.session_state.get("adv_per_parent_prompt", 3))
+    st.session_state["stitch_max_chars"] = int(st.session_state.get("adv_stitch_max_chars", 1500))
 
 def render_phase_llm_page(prefs):
     import streamlit as st
@@ -1507,6 +1688,120 @@ def render_phase_chat_page(prefs):
             except Exception as e:
                 st.error(f"Errore salvataggio playbook: {e}")
 
+def render_phase_solutions_memory_page(prefs):
+    import streamlit as st
+
+    # Normalize prefs to a dict
+    if isinstance(prefs, dict):
+        prefs_dict = prefs
+    else:
+        prefs_dict = st.session_state.get("prefs", {})
+
+    # Persist dir for the memories collection
+    persist_dir = st.session_state.get(
+        "persist_dir",
+        prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR),
+    )
+
+    st.title("Phase 6 – Solutions memory")
+    st.write(
+        "Review and manage saved playbooks (memories) derived from solved tickets."
+    )
+
+    st.markdown("---")
+
+    st.header("Solutions memory")
+
+    st.checkbox("Show full text of playbooks (MEM)",
+        key="mem_show_full",
+        help="If enabled, an expander with the full playbook appears under each MEM result."
+    )
+    enable_memory = st.checkbox("Enable 'playbook' memory (separate collection)",
+        value=st.session_state.get("enable_memory", False),
+        help="When you mark an answer as 'Solved', I save a reusable mini-playbook."
+    )
+    st.session_state["enable_memory"] = enable_memory
+
+    mem_ttl_days = st.number_input("TTL (days) for playbooks",
+        min_value=7, max_value=365,
+        value=st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS), step=1
+    )
+    st.session_state["mem_ttl_days"] = int(mem_ttl_days)
+
+    c_mem1, c_mem2 = st.columns(2)
+    with c_mem1:
+        if st.session_state.pop("open_memories_after_save", False):
+            st.session_state["show_memories"] = True
+        st.checkbox("Show saved playbooks",
+            key="show_memories",
+            help="Display the list of the 'memories' collection on the main page."
+        )
+    with c_mem2:
+        mem_del_confirm = st.checkbox("Confirm delete memories", value=False)
+        if st.button("Delete all memories", disabled=not mem_del_confirm):
+            try:
+                _client = get_chroma_client(persist_dir)
+                _client.delete_collection(name=MEM_COLLECTION)
+                _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+                st.success("Memories deleted.")
+            except Exception as e:
+                st.error(f"Error deleting memories: {e}")
+
+    # Main: show the table only if active
+    if st.session_state.get("show_memories"):
+        st.subheader("Saved playbooks (memories)")
+        try:
+            _client = get_chroma_client(persist_dir)
+            _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
+
+            total = _mem.count()
+            st.caption(f"Collection: '{MEM_COLLECTION}' — path: {persist_dir} — count: {total}")
+
+            data = _mem.get(include=["documents", "metadatas"], limit=max(200, total))
+            ids   = data.get("ids") or []
+            docs  = data.get("documents") or []
+            metas = data.get("metadatas") or []
+
+            if total > 0 and not ids:
+                st.warning("La collection riporta count>0 ma get() è vuoto. Riprovo senza include…")
+                data = _mem.get(limit=max(200, total))  # fallback
+                ids   = data.get("ids") or []
+                docs  = data.get("documents") or []
+                metas = data.get("metadatas") or []
+
+            if not ids:
+                st.caption("Nessun playbook salvato.")
+            else:
+                from datetime import datetime
+                import pandas as pd
+
+                rows = []
+                for _id, doc, meta in zip(ids, docs, metas):
+                    meta = meta or {}
+                    created = meta.get("created_at")
+                    expires = meta.get("expires_at")
+
+                    created_s = datetime.fromtimestamp(created).strftime("%Y-%m-%d") if created else ""
+                    expires_s = datetime.fromtimestamp(expires).strftime("%Y-%m-%d") if expires else ""
+
+                    raw_tags = meta.get("tags", "")
+                    tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
+
+                    prev = (doc[:120] + "…") if doc and len(doc) > 120 else (doc or "")
+
+                    rows.append({
+                        "ID": _id,
+                        "Project": meta.get("project", ""),
+                        "Tags": tags,
+                        "Created": created_s,
+                        "Expires": expires_s,
+                        "Preview": prev,
+                    })
+
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        except Exception as e:
+            st.error(f"Error reading memories: {e}")
+
 # ------------------------------
 # Main Streamlit UI
 # ------------------------------
@@ -1615,6 +1910,10 @@ def run_streamlit_app():
     # Phase 5 – Chat & Results (page)
     if phase == "Chat & Results":
         render_phase_chat_page(prefs)
+
+    # Phase 6 - Solutions memory
+    if phase == "Solutions memory":
+        render_phase_solutions_memory_page(prefs)
 
     with st.sidebar:
         # --- Wizard-style navigation (visual only, all sections still visible) ---
@@ -1897,43 +2196,6 @@ def run_streamlit_app():
                     st.error(f"Error while restoring: {e}")
 
         st.markdown("---")
-        st.header("Solutions memory")
-
-        st.checkbox("Show full text of playbooks (MEM)",
-            key="mem_show_full",
-            help="If enabled, an expander with the full playbook appears under each MEM result."
-        )
-        enable_memory = st.checkbox("Enable 'playbook' memory (separate collection)",
-            value=st.session_state.get("enable_memory", False),
-            help="When you mark an answer as 'Solved', I save a reusable mini-playbook."
-        )
-        st.session_state["enable_memory"] = enable_memory
-
-        mem_ttl_days = st.number_input("TTL (days) for playbooks",
-            min_value=7, max_value=365,
-            value=st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS), step=1
-        )
-        st.session_state["mem_ttl_days"] = int(mem_ttl_days)
-
-        c_mem1, c_mem2 = st.columns(2)
-        with c_mem1:
-            if st.session_state.pop("open_memories_after_save", False):
-                st.session_state["show_memories"] = True
-            st.checkbox("Show saved playbooks",
-                key="show_memories",
-                help="Display the list of the 'memories' collection on the main page."
-            )
-        with c_mem2:
-            mem_del_confirm = st.checkbox("Confirm delete memories", value=False)
-            if st.button("Delete all memories", disabled=not mem_del_confirm):
-                try:
-                    _client = get_chroma_client(persist_dir)
-                    _client.delete_collection(name=MEM_COLLECTION)
-                    _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
-                    st.success("Memories deleted.")
-                except Exception as e:
-                    st.error(f"Error deleting memories: {e}")
-        st.markdown("---")
         if not IS_CLOUD:
             quit_btn = st.button("Quit", use_container_width=True)
             if quit_btn:
@@ -1963,7 +2225,7 @@ def run_streamlit_app():
             )
 
             # Do not open if we are on NEW_LABEL and the name is empty (or only default) and does not yet exist
-            if st.session_state.get("collection_selected") == NEW_LABEL and (collection_name == "" or (collection_name == DEFAULT_COLLECTION and collection_name not in coll_options)):
+            if st.session_state.get("collection_selected") == NEW_LABEL and (collection_name == "" or collection_name == DEFAULT_COLLECTION):
                 pass  # wait for the user to click "Index" to create the new collection
             else:
                 if changed:
@@ -2006,214 +2268,6 @@ def run_streamlit_app():
                 st.rerun()
             except Exception as e:
                 st.error(f"Connection failed: {e}")
-
-    # Projects & issues
-
-    st.subheader("YouTrack Projects")
-    if st.session_state.get("yt_client"):
-        projects = st.session_state.get("projects", [])
-        if projects:
-            names = [f"{p.get('name')} ({p.get('shortName')})" for p in projects]
-            sel = st.selectbox("Choose project", options=["-- select --"] + names, key="proj_select")
-
-            if sel and sel != "-- select --":
-                p = projects[names.index(sel)]
-                project_key = p.get("shortName") or p.get("name")
-
-                # AUTO-LOAD: when the project changes, immediately load the issues
-                prev_key = st.session_state.get("last_project_key")
-                if prev_key != project_key:
-                    try:
-                        with st.spinner("Loading issues..."):
-                            st.session_state["issues"] = st.session_state["yt_client"].list_issues(project_key)
-                        st.session_state["last_project_key"] = project_key
-                        st.success(f"Loaded {len(st.session_state['issues'])} issues")
-                    except Exception as e:
-                        st.error(f"Error loading issues: {e}")
-
-                # optional: button to reload manually
-                if st.button("Reload issues"):
-                    try:
-                        with st.spinner("Reloading issues..."):
-                            st.session_state["issues"] = st.session_state["yt_client"].list_issues(project_key)
-                        st.success(f"Loaded {len(st.session_state['issues'])} issues")
-                    except Exception as e:
-                        st.error(f"Reload error: {e}")
-        else:
-            st.caption("No project found (or insufficient permissions).")
-
-    # ALWAYS show the table if there are issues in memory
-    issues = st.session_state.get("issues", [])
-    if issues:
-        base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
-
-        # Build a Markdown table with clickable ID and without Project/Open
-        lines = []
-        lines.append("| ID | Summary |")
-        lines.append("|---|---|")
-        for it in issues:
-            url = f"{base_url}/issue/{it.id_readable}" if base_url else ""
-            id_cell = f"[{it.id_readable}]({url})" if url else it.id_readable
-            # trim very long summaries (optional)
-            summary = it.summary.strip().replace("\n", " ")
-            if len(summary) > 160:
-                summary = summary[:157] + "..."
-            lines.append(f"| {id_cell} | {summary} |")
-
-        st.markdown("\n".join(lines), unsafe_allow_html=False)
-    else:
-        st.caption("No issues in memory. Select a project to load tickets.")
-
-    # Main: show the table only if active
-    if st.session_state.get("show_memories"):
-        st.subheader("Saved playbooks (memories)")
-        try:
-            _client = get_chroma_client(persist_dir)
-            _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
-
-            total = _mem.count()
-            st.caption(f"Collection: '{MEM_COLLECTION}' — path: {persist_dir} — count: {total}")
-
-            data = _mem.get(include=["documents", "metadatas"], limit=max(200, total))
-            ids   = data.get("ids") or []
-            docs  = data.get("documents") or []
-            metas = data.get("metadatas") or []
-
-            if total > 0 and not ids:
-                st.warning("La collection riporta count>0 ma get() è vuoto. Riprovo senza include…")
-                data = _mem.get(limit=max(200, total))  # fallback
-                ids   = data.get("ids") or []
-                docs  = data.get("documents") or []
-                metas = data.get("metadatas") or []
-
-            if not ids:
-                st.caption("Nessun playbook salvato.")
-            else:
-                from datetime import datetime
-                import pandas as pd
-
-                rows = []
-                for _id, doc, meta in zip(ids, docs, metas):
-                    meta = meta or {}
-                    created = meta.get("created_at")
-                    expires = meta.get("expires_at")
-
-                    created_s = datetime.fromtimestamp(created).strftime("%Y-%m-%d") if created else ""
-                    expires_s = datetime.fromtimestamp(expires).strftime("%Y-%m-%d") if expires else ""
-
-                    raw_tags = meta.get("tags", "")
-                    tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
-
-                    prev = (doc[:120] + "…") if doc and len(doc) > 120 else (doc or "")
-
-                    rows.append({
-                        "ID": _id,
-                        "Project": meta.get("project", ""),
-                        "Tags": tags,
-                        "Created": created_s,
-                        "Expires": expires_s,
-                        "Preview": prev,
-                    })
-
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
-        except Exception as e:
-            st.error(f"Error reading memories: {e}")
-
-    # Ingest
-    st.subheader("Vector DB Indexing")
-    # --- Embeddings backend/model for ingestion, chat and playbooks ---
-    emb_backend = st.session_state.get(
-        "emb_provider_select",
-        prefs.get("emb_backend", "OpenAI"),
-    )
-    emb_model_name = st.session_state.get(
-        "emb_model",
-        prefs.get("emb_model_name", "text-embedding-3-small"),
-    )
-
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        start_ingest = st.button("Index tickets")
-    with col2:
-        st.caption("Create ticket embeddings and save them to Chroma for semantic retrieval")
-
-    # Read chunking configuration from session_state
-    enable_chunking = bool(st.session_state.get("enable_chunking", True))
-    chunk_size = int(st.session_state.get("chunk_size", 800))
-    chunk_overlap = int(st.session_state.get("chunk_overlap", 80))
-    chunk_min = int(st.session_state.get("chunk_min", 512))
-
-    if start_ingest:
-        issues = st.session_state.get("issues", [])
-        if not issues:
-            st.error("First load the project's tickets")
-        else:
-            try:
-                st.session_state["vector"] = VectorStore(persist_dir=persist_dir, collection_name=collection_name)
-                use_openai_embeddings = (emb_backend == "OpenAI")
-                st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
-                # Save embeddings model metadata for consistency
-                try:
-                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
-                    meta = {"provider": st.session_state["embedder"].provider_name, "model": st.session_state["embedder"].model_name}
-                    with open(meta_path, "w", encoding="utf-8") as f:
-                        json.dump(meta, f)
-                except Exception:
-                    pass
-
-                # NEW: chunked indexing with metadata parent_id, chunk_id, pos
-                all_ids = []
-                all_docs = []
-                all_metas = []
-                embed_inputs = []
-
-                for it in issues:
-                    full_text = it.text_blob()
-                    if enable_chunking:
-                        pieces = split_into_chunks(
-                            full_text,
-                            chunk_size=int(chunk_size),
-                            overlap=int(chunk_overlap),
-                            min_size=int(chunk_min),
-                        )
-                    else:
-                        pieces = [(0, full_text)]
-
-                    if not pieces:
-                        pieces = [(0, full_text)]
-
-                    multi = len(pieces) > 1  # true se davvero abbiamo più chunk
-
-                    for idx, (pos0, chunk_text) in enumerate(pieces, start=1):
-                        # usa ID semplice se non stai spezzando
-                        cid = f"{it.id_readable}::c{idx:03d}" if multi else it.id_readable
-
-                        all_ids.append(cid)
-                        all_docs.append(chunk_text)
-
-                        meta = {
-                            "parent_id": it.id_readable,
-                            "id_readable": it.id_readable,
-                            "summary": it.summary,
-                            "project": it.project,
-                        }
-                        if multi:
-                            meta["chunk_id"] = idx          # int
-                            meta["pos"] = int(pos0)         # int
-
-                        all_metas.append(meta)
-                        all_metas = [{k: v for k, v in m.items() if v is not None} for m in all_metas]
-                        embed_inputs.append(f"{it.id_readable} | {it.summary}\n\n{chunk_text}")
-                with st.spinner(f"Computing embeddings for {len(all_ids)} {'chunks' if enable_chunking else 'documents'} and saving to Chroma..."):
-                    embs = st.session_state["embedder"].embed(embed_inputs)
-                    st.session_state["vector"].add(ids=all_ids, documents=all_docs, metadatas=all_metas, embeddings=embs)
-                # update counter
-                st.session_state["vs_persist_dir"] = persist_dir
-                st.session_state["vs_collection"] = collection_name
-                st.session_state["vs_count"] = st.session_state["vector"].count()
-                st.success(f"Indexing completed. Total {'chunks' if enable_chunking else 'documents'}: {st.session_state['vs_count']}")
-            except Exception as e:
-                st.error(f"Indexing error: {e}")
 
 # ------------------------------
 # CLI + Self-tests (optional)
