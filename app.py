@@ -115,7 +115,8 @@ NON_SENSITIVE_PREF_KEYS = {
     "enable_memory",
     "mem_ttl_days",
     "mem_show_full",
-    "show_memories"
+    "show_memories",
+    "prefs_enabled",
     }
 
 def load_prefs() -> dict:
@@ -139,6 +140,7 @@ def save_prefs(prefs: dict):
 def init_prefs_in_session():
     prefs = load_prefs() or {}
 
+    # --- Fix persist_dir for cloud/local ---
     pd = (prefs.get("persist_dir") or "").strip()
     if not pd:
         prefs["persist_dir"] = DEFAULT_CHROMA_DIR
@@ -146,6 +148,12 @@ def init_prefs_in_session():
         if IS_CLOUD and not pd.startswith("/tmp/"):
             prefs["persist_dir"] = DEFAULT_CHROMA_DIR
 
+    # --- Initialize session_state for all prefs keys (once only) ---
+    for key, value in prefs.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+    # Keep full prefs dict available in session
     st.session_state["prefs"] = prefs
 
 
@@ -1704,19 +1712,21 @@ def render_phase_chat_page(prefs):
                 st.error(f"Errore salvataggio playbook: {e}")
 
 def render_phase_solutions_memory_page(prefs):
-    # --- Prefs: dai priorità a quelli in session_state (possono essere più recenti) ---
+    import streamlit as st
+
+    # 1) prefs_dict: dai priorità a quelli in session_state
     if isinstance(prefs, dict):
         prefs_dict = st.session_state.get("prefs", prefs)
     else:
         prefs_dict = st.session_state.get("prefs", {})
 
-    # Persist dir for the memories collection
+    # 2) Persist dir per la collection dei playbook
     persist_dir = st.session_state.get(
         "persist_dir",
         prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR),
     )
 
-    # --- Inizializza una sola volta i valori in session_state dai prefs salvati ---
+    # 3) Bootstrap UNA SOLA VOLTA i valori in session_state dai prefs
     if "enable_memory" not in st.session_state:
         st.session_state["enable_memory"] = bool(prefs_dict.get("enable_memory", False))
 
@@ -1737,36 +1747,42 @@ def render_phase_solutions_memory_page(prefs):
     st.markdown("---")
     st.header("Solutions memory")
 
-    # Usa solo key=..., i value vengono da session_state (già inizializzato)
-    st.checkbox(
+    # 4) Widget → value da session_state, poi riscrivo in session_state
+    mem_show_full = st.checkbox(
         "Show full text of playbooks (MEM)",
-        key="mem_show_full",
+        value=st.session_state["mem_show_full"],
         help="If enabled, an expander with the full playbook appears under each MEM result.",
     )
+    st.session_state["mem_show_full"] = mem_show_full
 
-    st.checkbox(
+    enable_memory = st.checkbox(
         "Enable 'playbook' memory (separate collection)",
-        key="enable_memory",
+        value=st.session_state["enable_memory"],
         help="When you mark an answer as 'Solved', I save a reusable mini-playbook.",
     )
+    st.session_state["enable_memory"] = enable_memory
 
-    st.number_input(
+    mem_ttl_days = st.number_input(
         "TTL (days) for playbooks",
         min_value=7,
         max_value=365,
         step=1,
-        key="mem_ttl_days",
+        value=int(st.session_state["mem_ttl_days"]),
     )
+    st.session_state["mem_ttl_days"] = int(mem_ttl_days)
 
     c_mem1, c_mem2 = st.columns(2)
     with c_mem1:
         if st.session_state.pop("open_memories_after_save", False):
             st.session_state["show_memories"] = True
-        st.checkbox(
+
+        show_memories = st.checkbox(
             "Show saved playbooks",
-            key="show_memories",
+            value=st.session_state["show_memories"],
             help="Display the list of the 'memories' collection on the main page.",
         )
+        st.session_state["show_memories"] = show_memories
+
     with c_mem2:
         mem_del_confirm = st.checkbox("Confirm delete memories", value=False)
         if st.button("Delete all memories", disabled=not mem_del_confirm):
@@ -1783,7 +1799,7 @@ def render_phase_solutions_memory_page(prefs):
 
     st.markdown("---")
 
-    # Main: show the table only if active
+    # 5) Tabella dei playbook solo se attivata
     if st.session_state.get("show_memories"):
         st.subheader("Saved playbooks (memories)")
         try:
@@ -1826,7 +1842,12 @@ def render_phase_solutions_memory_page(prefs):
                     expires_s = datetime.fromtimestamp(expires).strftime("%Y-%m-%d") if expires else ""
 
                     raw_tags = meta.get("tags", "")
-                    tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
+                    if isinstance(raw_tags, str):
+                        tags = raw_tags
+                    elif raw_tags:
+                        tags = ", ".join(raw_tags)
+                    else:
+                        tags = ""
 
                     prev = (doc[:120] + "…") if doc and len(doc) > 120 else (doc or "")
 
@@ -1858,7 +1879,15 @@ def render_phase_preferences_debug_page(prefs):
     else:
         prefs_dict = st.session_state.get("prefs", {})
 
-    prefs_enabled = st.checkbox("Enable preferences memory (local)", value=True, help="Save non-sensitive settings in .app_prefs.json")
+    if "prefs_enabled" not in st.session_state:
+        st.session_state["prefs_enabled"] = bool(prefs_dict.get("prefs_enabled", True))
+
+    prefs_enabled = st.checkbox(
+        "Enable preferences memory (local)",
+        value=st.session_state["prefs_enabled"],
+    )
+    st.session_state["prefs_enabled"] = int(prefs_enabled)
+
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Save preferences"):
@@ -1882,37 +1911,37 @@ def render_phase_preferences_debug_page(prefs):
                         _model_for_save = DEFAULT_LLM_MODEL if _provider_for_save == "OpenAI" else DEFAULT_OLLAMA_MODEL
 
                     # --- Read current UI values or session defaults ---
-                    yt_url = st.session_state.get("yt_url", prefs.get("yt_url", ""))
-                    persist_dir = st.session_state.get("persist_dir", prefs.get("persist_dir", ""))
+                    yt_url = st.session_state.get("yt_url", prefs_dict.get("yt_url", ""))
+                    persist_dir = st.session_state.get("persist_dir", prefs_dict.get("persist_dir", ""))
 
-                    emb_backend = st.session_state.get("emb_provider_select", prefs.get("emb_backend", "OpenAI"))
-                    emb_model_name = st.session_state.get("emb_model", prefs.get("emb_model_name", "text-embedding-3-small"))
+                    emb_backend = st.session_state.get("emb_provider_select", prefs_dict.get("emb_backend", "OpenAI"))
+                    emb_model_name = st.session_state.get("emb_model", prefs_dict.get("emb_model_name", "text-embedding-3-small"))
 
-                    llm_temperature = st.session_state.get("llm_temperature", prefs.get("llm_temperature", 0.2))
-                    max_distance = st.session_state.get("max_distance", prefs.get("max_distance", 0.9))
-                    show_prompt = st.session_state.get("show_prompt", prefs.get("show_prompt", True))
-                    collection_selected = st.session_state.get("collection_selected", prefs.get("collection_selected"))
-                    new_collection_name = st.session_state.get("new_collection_name_input", prefs.get("new_collection_name", "tickets"))
+                    llm_temperature = st.session_state.get("llm_temperature", prefs_dict.get("llm_temperature", 0.2))
+                    max_distance = st.session_state.get("max_distance", prefs_dict.get("max_distance", 0.9))
+                    show_prompt = st.session_state.get("show_prompt", prefs_dict.get("show_prompt", True))
+                    collection_selected = st.session_state.get("collection_selected", prefs_dict.get("collection_selected"))
+                    new_collection_name = st.session_state.get("new_collection_name_input", prefs_dict.get("new_collection_name", "tickets"))
 
                     # --- Chunking ---
-                    enable_chunking = bool(st.session_state.get("enable_chunking", prefs.get("enable_chunking", True)))
-                    chunk_size = int(st.session_state.get("chunk_size", prefs.get("chunk_size", 800)))
-                    chunk_overlap = int(st.session_state.get("chunk_overlap", prefs.get("chunk_overlap", 80)))
-                    chunk_min = int(st.session_state.get("chunk_min", prefs.get("chunk_min", 512)))
+                    enable_chunking = bool(st.session_state.get("enable_chunking", prefs_dict.get("enable_chunking", True)))
+                    chunk_size = int(st.session_state.get("chunk_size", prefs_dict.get("chunk_size", 800)))
+                    chunk_overlap = int(st.session_state.get("chunk_overlap", prefs_dict.get("chunk_overlap", 80)))
+                    chunk_min = int(st.session_state.get("chunk_min", prefs_dict.get("chunk_min", 512)))
 
                     # --- Advanced settings ---
-                    show_distances = bool(st.session_state.get("adv_show_distances", prefs.get("show_distances", False)))
-                    top_k = int(st.session_state.get("adv_top_k", prefs.get("top_k", 5)))
-                    collapse_duplicates = bool(st.session_state.get("adv_collapse_duplicates", prefs.get("collapse_duplicates", True)))
-                    per_parent_display = int(st.session_state.get("adv_per_parent_display", prefs.get("per_parent_display", 1)))
-                    per_parent_prompt = int(st.session_state.get("adv_per_parent_prompt", prefs.get("per_parent_prompt", 3)))
-                    stitch_max_chars = int(st.session_state.get("adv_stitch_max_chars", prefs.get("stitch_max_chars", 1500)))
+                    show_distances = bool(st.session_state.get("adv_show_distances", prefs_dict.get("show_distances", False)))
+                    top_k = int(st.session_state.get("adv_top_k", prefs_dict.get("top_k", 5)))
+                    collapse_duplicates = bool(st.session_state.get("adv_collapse_duplicates", prefs_dict.get("collapse_duplicates", True)))
+                    per_parent_display = int(st.session_state.get("adv_per_parent_display", prefs_dict.get("per_parent_display", 1)))
+                    per_parent_prompt = int(st.session_state.get("adv_per_parent_prompt", prefs_dict.get("per_parent_prompt", 3)))
+                    stitch_max_chars = int(st.session_state.get("adv_stitch_max_chars", prefs_dict.get("stitch_max_chars", 1500)))
 
                     # --- Solutions memory settings ---
-                    enable_memory = bool(st.session_state.get("enable_memory", prefs.get("enable_memory", False)))
-                    mem_ttl_days = int(st.session_state.get("mem_ttl_days", prefs.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)))
-                    mem_show_full = bool(st.session_state.get("mem_show_full", prefs.get("mem_show_full", False)))
-                    show_memories = bool(st.session_state.get("show_memories", prefs.get("show_memories", False)))
+                    enable_memory = bool(st.session_state.get("enable_memory", prefs_dict.get("enable_memory", False)))
+                    mem_ttl_days = int(st.session_state.get("mem_ttl_days", prefs_dict.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)))
+                    mem_show_full = bool(st.session_state.get("mem_show_full", prefs_dict.get("mem_show_full", False)))
+                    show_memories = bool(st.session_state.get("show_memories", prefs_dict.get("show_memories", False)))
 
                     # --- Save all prefs ---
                     new_prefs = {
@@ -1941,11 +1970,12 @@ def render_phase_preferences_debug_page(prefs):
                         "mem_ttl_days": mem_ttl_days,
                         "mem_show_full": mem_show_full,
                         "show_memories": show_memories,
+                        "prefs_enabled": prefs_enabled,
                     }
 
                     save_prefs(new_prefs)
                     st.session_state["prefs"] = load_prefs()
-                    st.success("Preferences salvate.")
+                    st.success("Preferences saved.")
                     st.toast("Saved to .app_prefs.json", icon="✅")
 
                 except Exception as e:
@@ -1968,7 +1998,7 @@ def render_phase_preferences_debug_page(prefs):
 
     st.header("Debug")
     if "show_prompt" not in st.session_state:
-        st.session_state["show_prompt"] = bool(prefs.get("show_prompt", False))
+        st.session_state["show_prompt"] = bool(prefs_dict.get("show_prompt", False))
     show_prompt = st.checkbox("Show LLM prompt", value=st.session_state["show_prompt"])
     st.session_state["show_prompt"] = show_prompt
 
@@ -1978,7 +2008,7 @@ def render_phase_preferences_debug_page(prefs):
 def run_streamlit_app():
     st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
     init_prefs_in_session()
-        # === Robust prefs loading & one-time bootstrap ===
+    # === Robust prefs loading & one-time bootstrap ===
     DEFAULT_PREFS = {
         "yt_url": "",
         "persist_dir": "",
@@ -2005,6 +2035,12 @@ def run_streamlit_app():
         "per_parent_display": 1,
         "per_parent_prompt": 3,
         "stitch_max_chars": 1500,
+
+        # solutions memory (NUOVI)
+        "enable_memory": False,
+        "mem_ttl_days": DEFAULT_MEM_TTL_DAYS,
+        "mem_show_full": False,
+        "show_memories": False,
     }
 
     def _normalize(p: dict) -> dict:
@@ -2038,6 +2074,12 @@ def run_streamlit_app():
 
         # Nome nuova collection (solo se non c'è già)
         _init("new_collection_name_input", (prefs.get("new_collection_name") or DEFAULT_COLLECTION))
+
+        # Solutions memory
+        _init("enable_memory",     bool(prefs.get("enable_memory", False)))
+        _init("mem_ttl_days",      int(prefs.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)))
+        _init("mem_show_full",     bool(prefs.get("mem_show_full", False)))
+        _init("show_memories",     bool(prefs.get("show_memories", False)))
 
         st.session_state["_prefs_bootstrapped"] = True
 
