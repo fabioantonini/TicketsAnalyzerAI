@@ -1382,11 +1382,6 @@ def render_phase_llm_page(prefs):
         )
     )
 
-    st.info(
-        f"Current LLM: **{current_provider} · {current_model}** · "
-        f"Temperature: **{current_temp:.2f}**"
-    )
-
     st.markdown("---")
 
     st.header("LLM")
