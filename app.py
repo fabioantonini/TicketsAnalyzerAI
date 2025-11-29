@@ -1395,9 +1395,21 @@ def render_phase_llm_page(prefs):
     ollama_ok, ollama_host = (False, None) if IS_CLOUD else is_ollama_available()
     llm_provider_options = ["OpenAI"] + (["Ollama (local)"] if ollama_ok else [])
 
-    # Default index consistent with prefs but safe if Ollama is NOT available
-    pref_provider = prefs_dict.get("llm_provider", "OpenAI")
-    default_idx = 0 if (pref_provider != "Ollama (local)" or not ollama_ok) else 1
+    # Prefer the value in session_state (if present), otherwise fall back to prefs
+    current_provider = st.session_state.get(
+        "llm_provider_select",
+        prefs_dict.get("llm_provider", "OpenAI"),
+    )
+
+    # If Ollama is not available anymore, force provider to OpenAI
+    if (not ollama_ok) and (current_provider == "Ollama (local)"):
+        current_provider = "OpenAI"
+
+    # Compute the index from the provider name
+    if current_provider in llm_provider_options:
+        default_idx = llm_provider_options.index(current_provider)
+    else:
+        default_idx = 0  # safe fallback
 
     llm_provider = st.selectbox(
         "LLM provider",
@@ -1417,18 +1429,35 @@ def render_phase_llm_page(prefs):
             DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL
         )
 
-    # Default for provider + prefs (ignoring empty strings)
-    llm_model_default = (DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
-    pref_llm_model = (prefs_dict.get("llm_model") or "").strip()
+    # --- LLM MODEL SELECTION ---
 
-    if "llm_model" not in st.session_state:
-        st.session_state["llm_model"] = pref_llm_model or llm_model_default
-    else:
-        if not (st.session_state["llm_model"] or "").strip():
-            st.session_state["llm_model"] = llm_model_default
+    # Determine the default model for this provider
+    provider_default_model = (
+        DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL
+    )
 
-    # Field controlled via session_state
-    llm_model = st.text_input("LLM model", key="llm_model")
+    # Read model from prefs (may be "")
+    prefs_model = (prefs_dict.get("llm_model") or "").strip()
+
+    # Build the canonical initial model:
+    # Priority: session_state → prefs → per-provider default
+    initial_model = (
+        st.session_state.get("llm_model")
+        or prefs_model
+        or provider_default_model
+    )
+
+    # Apply it BEFORE creating the widget
+    st.session_state["llm_model"] = initial_model
+
+    # Now we can safely draw the widget
+    llm_model = st.text_input(
+        "LLM model",
+        value=st.session_state["llm_model"]
+    )
+
+    # Normalize and rewrite into session_state
+    st.session_state["llm_model"] = (llm_model or provider_default_model).strip()
 
     # Temperature slider (as in your code)
     if "llm_temperature" not in st.session_state:
@@ -2201,7 +2230,6 @@ def run_streamlit_app():
     with st.sidebar:
         # --- Wizard-style navigation (visual only, all sections still visible) ---
         PHASES = [
-            "New RAG setup",
             "YouTrack connection",
             "Embeddings & Vector DB",
             "Retrieval configuration",
