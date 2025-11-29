@@ -770,6 +770,9 @@ def render_phase_embeddings_vectordb_page(prefs):
         "Configure the Chroma vector store (path and collections) and the embeddings "
         "provider/model used for indexing and query."
     )
+    msg = st.session_state.pop("_index_success", None)
+    if msg:
+        st.success(msg)
 
     # Small status summary on top (allineato con prefs + session_state)
     current_dir = (
@@ -1109,9 +1112,13 @@ def render_phase_embeddings_vectordb_page(prefs):
                 st.session_state["vs_persist_dir"] = persist_dir
                 st.session_state["vs_collection"] = collection_name
                 st.session_state["vs_count"] = st.session_state["vector"].count()
-                st.success(f"Indexing completed. Total {'chunks' if enable_chunking else 'documents'}: {st.session_state['vs_count']}")
+                # Store success status in session_state (will be displayed after rerun)
+                st.session_state["_index_success"] = f"Indexing completed. Total {'chunks' if enable_chunking else 'documents'}: {st.session_state['vs_count']}"
+                # Stay in Phase 2 after rerun
                 st.session_state["ui_phase_choice"] = "Embeddings & Vector DB"
+                # Force rerun
                 st.rerun()
+
             except Exception as e:
                 st.error(f"Indexing error: {e}")
 
