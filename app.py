@@ -1118,12 +1118,63 @@ def render_phase_embeddings_vectordb_page(prefs):
 def render_phase_retrieval_page(prefs):
     import streamlit as st
 
-    # Normalizza prefs in dict
+    # 1) Normalize prefs into a dict (same pattern as other phases)
     if isinstance(prefs, dict):
         prefs_dict = prefs
     else:
         prefs_dict = st.session_state.get("prefs", {})
 
+    # 2) Handle advanced reset (flag set in the previous run)
+    if st.session_state.pop("_adv_do_reset", False):
+        reset_defaults = {
+            # Distance / chunking
+            "max_distance": 0.9,
+            "enable_chunking": True,
+            "chunk_size": 800,
+            "chunk_overlap": 80,
+            "chunk_min": 512,
+            # Advanced (UI keys with adv_ prefix)
+            "adv_show_distances": False,
+            "adv_top_k": 5,
+            "adv_collapse_duplicates": True,
+            "adv_per_parent_display": 1,
+            "adv_per_parent_prompt": 3,
+            "adv_stitch_max_chars": 1500,
+        }
+        # Apply defaults into session_state (widgets will read from here)
+        for key, value in reset_defaults.items():
+            st.session_state[key] = value
+
+        # Optional visual feedback handled at the end of the function
+        st.session_state["_adv_reset_toast"] = True
+
+    # 3) One-time bootstrap from prefs for missing keys
+    #    (same pattern as Phase 6 – Solutions memory)
+    def init_state(key: str, default):
+        """Initialize a session_state key once, if not already set."""
+        if key not in st.session_state:
+            st.session_state[key] = default
+
+    # Distance + chunking
+    init_state("max_distance", float(prefs_dict.get("max_distance", 0.9)))
+    init_state("enable_chunking", bool(prefs_dict.get("enable_chunking", True)))
+    init_state("chunk_size", int(prefs_dict.get("chunk_size", 800)))
+    init_state("chunk_overlap", int(prefs_dict.get("chunk_overlap", 80)))
+    init_state("chunk_min", int(prefs_dict.get("chunk_min", 512)))
+
+    # Canonical prefs are key names without adv_ (show_distances, top_k, …)
+    # Widgets use adv_* (consistent with Phase 7 – Preferences & debug)
+    init_state("adv_show_distances", bool(prefs_dict.get("show_distances", False)))
+    init_state("adv_top_k", int(prefs_dict.get("top_k", 5)))
+    init_state(
+        "adv_collapse_duplicates",
+        bool(prefs_dict.get("collapse_duplicates", True)),
+    )
+    init_state("adv_per_parent_display", int(prefs_dict.get("per_parent_display", 1)))
+    init_state("adv_per_parent_prompt", int(prefs_dict.get("per_parent_prompt", 3)))
+    init_state("adv_stitch_max_chars", int(prefs_dict.get("stitch_max_chars", 1500)))
+
+    # 4) Main UI
     st.title("Phase 3 – Retrieval configuration")
     st.write(
         "Configure the distance threshold and chunking parameters used to retrieve "
@@ -1132,157 +1183,173 @@ def render_phase_retrieval_page(prefs):
 
     st.markdown("### Distance threshold")
 
-    max_default = float(prefs_dict.get("max_distance", 0.9))
     max_distance = st.slider(
         "Maximum distance threshold (cosine)",
         min_value=0.1,
         max_value=2.0,
         step=0.05,
-        value=float(st.session_state.get("max_distance", max_default)),
-        key="max_distance",
-        help="Maximum cosine distance for a result to be considered similar."
+        value=float(st.session_state["max_distance"]),
+        help="Maximum cosine distance for a result to be considered similar.",
     )
-    # Nessuna scrittura manuale in session_state: ci pensa lo slider
+    # Keep session_state in sync (widget has no key, so this is safe)
+    st.session_state["max_distance"] = float(max_distance)
 
     st.markdown("---")
     st.subheader("Chunking configuration")
 
-    enable_default = bool(prefs_dict.get("enable_chunking", True))
-    st.checkbox(
+    enable_chunking = st.checkbox(
         "Enable chunking",
-        key="enable_chunking",
-        value=bool(st.session_state.get("enable_chunking", enable_default)),
-        help="If enabled, long tickets are split into overlapping chunks before indexing."
+        value=bool(st.session_state["enable_chunking"]),
+        help="If enabled, long tickets are split into overlapping chunks before indexing.",
     )
+    st.session_state["enable_chunking"] = bool(enable_chunking)
 
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        st.number_input(
+        chunk_size = st.number_input(
             "Chunk size (tokens)",
             min_value=128,
             max_value=2048,
             step=64,
-            key="chunk_size",
-            value=int(st.session_state.get("chunk_size", prefs_dict.get("chunk_size", 800))),
-            help="Typical values: 512–800."
+            value=int(st.session_state["chunk_size"]),
+            help="Typical values: 512–800.",
         )
+        st.session_state["chunk_size"] = int(chunk_size)
 
     with c2:
-        st.number_input(
+        chunk_overlap = st.number_input(
             "Overlap (tokens)",
             min_value=0,
             max_value=512,
             step=10,
-            key="chunk_overlap",
-            value=int(st.session_state.get("chunk_overlap", prefs_dict.get("chunk_overlap", 80))),
-            help="How many tokens to overlap between consecutive chunks."
+            value=int(st.session_state["chunk_overlap"]),
+            help="How many tokens to overlap between consecutive chunks.",
         )
+        st.session_state["chunk_overlap"] = int(chunk_overlap)
 
     with c3:
-        st.number_input(
+        chunk_min = st.number_input(
             "Min size to chunk",
             min_value=128,
             max_value=2048,
             step=64,
-            key="chunk_min",
-            value=int(st.session_state.get("chunk_min", prefs_dict.get("chunk_min", 512))),
-            help="Below this size, the ticket is indexed as a single document."
+            value=int(st.session_state["chunk_min"]),
+            help="Below this size, the ticket is indexed as a single document.",
         )
+        st.session_state["chunk_min"] = int(chunk_min)
 
     st.info(
         "These settings are used when you run indexing (Phase 2) and when the retriever "
         "filters similar tickets (Phase 6)."
     )
 
-    # -----------------------------
-    # Advanced settings reset (pre-widgets)
-    # -----------------------------
-    if st.session_state.pop("_adv_do_reset", False):
-        _defaults = {
-            # Advanced
-            "adv_show_distances": False,
-            "adv_top_k": 5,
-            "adv_collapse_duplicates": True,
-            "adv_per_parent_display": 1,
-            "adv_per_parent_prompt": 3,
-            "adv_stitch_max_chars": 1500,
-            # Chunking
-            "enable_chunking": True,
-            "chunk_size": 800,
-            "chunk_overlap": 80,
-            "chunk_min": 512,
-        }
-        for _k, _v in _defaults.items():
-            st.session_state[_k] = _v
-        st.session_state["_adv_reset_toast"] = True
-
-    # -----------------------------
-    # Advanced settings (UI)
-    # -----------------------------
+    # 5) Advanced settings (UI + Reset)
     with st.expander("Advanced settings", expanded=False):
         show_distances = st.checkbox(
             "Show distances in results",
-            key="adv_show_distances",
+            value=bool(st.session_state["adv_show_distances"]),
             help="Display the distance/score next to each retrieved result.",
         )
+        st.session_state["adv_show_distances"] = bool(show_distances)
 
         top_k = st.number_input(
             "Top-K KB results",
             min_value=1,
             max_value=50,
             step=1,
-            key="adv_top_k",
-            help="Number of Knowledge Base results to pass downstream (before collapsing duplicates).",
+            value=int(st.session_state["adv_top_k"]),
+            help=(
+                "Number of Knowledge Base results to pass downstream "
+                "(before collapsing duplicates)."
+            ),
         )
+        st.session_state["adv_top_k"] = int(top_k)
 
         collapse_duplicates = st.checkbox(
             "Collapse duplicate results by ticket",
-            key="adv_collapse_duplicates",
+            value=bool(st.session_state["adv_collapse_duplicates"]),
             help="Show only one result per ticket in the UI (keeps recall for the prompt context).",
         )
+        st.session_state["adv_collapse_duplicates"] = bool(collapse_duplicates)
 
         per_parent_display = st.number_input(
             "Max results per ticket (UI)",
             min_value=1,
             max_value=10,
             step=1,
-            key="adv_per_parent_display",
+            value=int(st.session_state["adv_per_parent_display"]),
             help="Maximum number of results displayed for the same ticket in the UI.",
         )
+        st.session_state["adv_per_parent_display"] = int(per_parent_display)
 
         per_parent_prompt = st.number_input(
             "Max chunks per ticket (prompt)",
             min_value=1,
             max_value=10,
             step=1,
-            key="adv_per_parent_prompt",
+            value=int(st.session_state["adv_per_parent_prompt"]),
             help="Maximum number of chunks concatenated per ticket in the prompt context.",
         )
+        st.session_state["adv_per_parent_prompt"] = int(per_parent_prompt)
 
         stitch_max_chars = st.number_input(
             "Stitched context limit (chars)",
             min_value=200,
             max_value=20000,
             step=100,
-            key="adv_stitch_max_chars",
-            help="Character limit when concatenating multiple chunks of the same ticket for the prompt context.",
+            value=int(st.session_state["adv_stitch_max_chars"]),
+            help=(
+                "Character limit when concatenating multiple chunks of the same ticket "
+                "for the prompt context."
+            ),
         )
+        st.session_state["adv_stitch_max_chars"] = int(stitch_max_chars)
 
+        # Reset button: only sets a flag, actual reset happens at the beginning
         if st.button("Reset to defaults", key="adv_reset_btn"):
             st.session_state["_adv_do_reset"] = True
             st.rerun()
 
+    # Toast after the reset run
     if st.session_state.pop("_adv_reset_toast", False):
         st.toast("Advanced settings reset to defaults", icon="↩️")
 
-    # Make them available during the current run (for downstream functions)
-    st.session_state["show_distances"] = st.session_state.get("adv_show_distances", False)
+    # 6) Synchronize logical keys used by Chat + sidebar (no adv_ prefix)
+    st.session_state["show_distances"] = bool(
+        st.session_state.get("adv_show_distances", False)
+    )
     st.session_state["top_k"] = int(st.session_state.get("adv_top_k", 5))
-    st.session_state["collapse_duplicates"] = st.session_state.get("adv_collapse_duplicates", True)
-    st.session_state["per_parent_display"] = int(st.session_state.get("adv_per_parent_display", 1))
-    st.session_state["per_parent_prompt"] = int(st.session_state.get("adv_per_parent_prompt", 3))
-    st.session_state["stitch_max_chars"] = int(st.session_state.get("adv_stitch_max_chars", 1500))
+    st.session_state["collapse_duplicates"] = bool(
+        st.session_state.get("adv_collapse_duplicates", True)
+    )
+    st.session_state["per_parent_display"] = int(
+        st.session_state.get("adv_per_parent_display", 1)
+    )
+    st.session_state["per_parent_prompt"] = int(
+        st.session_state.get("adv_per_parent_prompt", 3)
+    )
+    st.session_state["stitch_max_chars"] = int(
+        st.session_state.get("adv_stitch_max_chars", 1500)
+    )
+
+    # 7) Update prefs in memory (Phase 7 handles writing to disk)
+    prefs_dict.update(
+        {
+            "max_distance": float(st.session_state["max_distance"]),
+            "enable_chunking": bool(st.session_state["enable_chunking"]),
+            "chunk_size": int(st.session_state["chunk_size"]),
+            "chunk_overlap": int(st.session_state["chunk_overlap"]),
+            "chunk_min": int(st.session_state["chunk_min"]),
+            "show_distances": bool(st.session_state["show_distances"]),
+            "top_k": int(st.session_state["top_k"]),
+            "collapse_duplicates": bool(st.session_state["collapse_duplicates"]),
+            "per_parent_display": int(st.session_state["per_parent_display"]),
+            "per_parent_prompt": int(st.session_state["per_parent_prompt"]),
+            "stitch_max_chars": int(st.session_state["stitch_max_chars"]),
+        }
+    )
+    st.session_state["prefs"] = prefs_dict
 
 def render_phase_llm_page(prefs):
     import streamlit as st
@@ -1336,8 +1403,8 @@ def render_phase_llm_page(prefs):
         "LLM provider",
         llm_provider_options,
         index=default_idx,
-        key="llm_provider_select",
     )
+    st.session_state["llm_provider_select"] = llm_provider
 
     if not ollama_ok:
         st.caption("⚠️ Ollama is not available in this environment; option disabled.")
