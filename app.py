@@ -774,31 +774,12 @@ def render_phase_embeddings_vectordb_page(prefs):
     if msg:
         st.success(msg)
 
+    status_box = st.empty()  # placeholder for the top summary
+
     # Small status summary on top (allineato con prefs + session_state)
     current_dir = (
         st.session_state.get("persist_dir")
         or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
-    )
-
-    current_collection = (
-        st.session_state.get("vs_collection")
-        or prefs_dict.get("collection_selected")
-        or prefs_dict.get("new_collection_name", "")
-    )
-
-    current_provider = (
-        st.session_state.get("emb_provider_select")
-        or prefs_dict.get("emb_backend", "OpenAI")
-    )
-
-    current_model = (
-        st.session_state.get("emb_model")
-        or prefs_dict.get("emb_model_name", "")
-    )
-
-    st.info(
-        f"Current collection: **{current_collection or 'none'}** · "
-        f"Provider: **{current_provider}** · Model: **{current_model or 'n/a'}**"
     )
 
     st.markdown("---")
@@ -874,11 +855,11 @@ def render_phase_embeddings_vectordb_page(prefs):
             new_name = st.text_input("New collection name", key="new_collection_name_input")
             st.caption("ℹ️ This collection will be physically created after you run **Index tickets** at least once.")
             collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION            
-            st.session_state["collection_selected"] = NEW_LABEL
+            st.session_state["collection_selected"] = collection_name
             st.session_state["vs_collection"] = collection_name
         else:
             collection_name = sel
-            st.session_state["collection_selected"] = sel
+            st.session_state["collection_selected"] = collection_name
             st.session_state["vs_collection"] = collection_name
             st.session_state["after_delete_reset"] = True
     else:
@@ -886,8 +867,35 @@ def render_phase_embeddings_vectordb_page(prefs):
         new_name = st.text_input("New collection", key="new_collection_name_input")
         st.caption("ℹ️ This collection will be physically created after you run **Index tickets** at least once.")
         collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION
-        st.session_state["collection_selected"] = NEW_LABEL
+        st.session_state["collection_selected"] = collection_name
         st.session_state["vs_collection"] = collection_name
+
+    # --- Top status summary AFTER collection / embeddings state is resolved ---
+
+    current_dir = (
+        st.session_state.get("persist_dir")
+        or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
+    )
+
+    current_collection = st.session_state.get(
+        "vs_collection",
+        prefs_dict.get("collection_selected"),
+    )
+
+    current_provider = (
+        st.session_state.get("emb_provider_select")
+        or prefs_dict.get("emb_backend", "OpenAI")
+    )
+
+    current_model = (
+        st.session_state.get("emb_model")
+        or prefs_dict.get("emb_model_name", "")
+    )
+
+    status_box.info(
+        f"Current collection: **{current_collection or 'none'}** · "
+        f"Provider: **{current_provider}** · Model: **{current_model or 'n/a'}**"
+    )
 
     # -----------------------------
     # Collection management: delete
@@ -1501,6 +1509,14 @@ def render_phase_chat_page(prefs):
     import streamlit as st
 
     # Normalize prefs to a dict
+    # Ensure vs_collection is initialized once at startup from prefs
+    if "vs_collection" not in st.session_state:
+        st.session_state["vs_collection"] = (
+            prefs_dict.get("collection_selected") or
+            prefs_dict.get("new_collection_name") or
+            None
+        )
+
     if isinstance(prefs, dict):
         prefs_dict = prefs
     else:
@@ -1547,7 +1563,7 @@ def render_phase_chat_page(prefs):
         ),
     )
 
-    st.title("Phase 5 – Chat & Results")
+    st.title("Phase 6 – Chat & Results")
     st.write(
         "Ask questions about your YouTrack tickets. The app retrieves similar tickets "
         "from the vector store, sends them to the LLM, and shows the answer together "
@@ -1837,7 +1853,7 @@ def render_phase_solutions_memory_page(prefs):
     if "show_memories" not in st.session_state:
         st.session_state["show_memories"] = bool(prefs_dict.get("show_memories", False))
 
-    st.title("Phase 6 – Solutions memory")
+    st.title("Phase 5 – Solutions memory")
     st.write(
         "Review and manage saved playbooks (memories) derived from solved tickets."
     )
@@ -2236,8 +2252,8 @@ def run_streamlit_app():
             "Embeddings & Vector DB",
             "Retrieval configuration",
             "LLM & API keys",
-            "Chat & Results",
             "Solutions memory",
+            "Chat & Results",
             "Preferences & debug",
         ]
 
