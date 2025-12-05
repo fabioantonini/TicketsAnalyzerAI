@@ -74,6 +74,7 @@ def pick_default_chroma_dir() -> str:
     env_dir = os.getenv("CHROMA_DIR")
     if env_dir:
         return env_dir
+
     # also support st.secrets["CHROMA_DIR"]
     try:
         import streamlit as st  # type: ignore
@@ -82,7 +83,15 @@ def pick_default_chroma_dir() -> str:
             return str(sec_dir)
     except Exception:
         pass
-    return "/tmp/chroma" if IS_CLOUD or not os.access(APP_DIR, os.W_OK) else os.path.join(APP_DIR, "data", "chroma")
+
+    # We already checked writability in is_cloud(); rely only on that.
+    if IS_CLOUD:
+        # cloud / ambienti read-only → usa /tmp
+        return "/tmp/chroma"
+
+    # local / docker con codice scrivibile → usa cartella del progetto
+    return os.path.join(APP_DIR, "data", "chroma")
+
 
 DEFAULT_CHROMA_DIR = pick_default_chroma_dir()
 
@@ -759,40 +768,64 @@ def render_phase_yt_connection_page(prefs):
 def render_phase_embeddings_vectordb_page(prefs):
     import streamlit as st
 
-    # Normalize prefs to a dict
+    # -----------------------------
+    # 0) Normalize prefs and bootstrap state
+    # -----------------------------
     if isinstance(prefs, dict):
         prefs_dict = prefs
     else:
         prefs_dict = st.session_state.get("prefs", {})
 
+    def init_state(key: str, default):
+        """Initialize a session_state key once, if not already set."""
+        if key not in st.session_state:
+            st.session_state[key] = default
+
+    # Persist dir
+    init_state("persist_dir", prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR))
+
+    # Collections (semantic: collection_selected + vs_collection = actual name)
+    init_state(
+        "collection_selected",
+        (prefs_dict.get("collection_selected") or "").strip() or None,
+    )
+    init_state(
+        "vs_collection",
+        (prefs_dict.get("collection_selected") or "").strip()
+        or prefs_dict.get("new_collection_name")
+        or None,
+    )
+    init_state(
+        "new_collection_name_input",
+        prefs_dict.get("new_collection_name", DEFAULT_COLLECTION),
+    )
+
+    # -----------------------------
+    # 1) Header + success message
+    # -----------------------------
     st.title("Phase 2 – Embeddings & Vector DB")
     st.write(
         "Configure the Chroma vector store (path and collections) and the embeddings "
         "provider/model used for indexing and query."
     )
+
     msg = st.session_state.pop("_index_success", None)
     if msg:
         st.success(msg)
 
-    status_box = st.empty()  # placeholder for the top summary
-
-    # Small status summary on top (allineato con prefs + session_state)
-    current_dir = (
-        st.session_state.get("persist_dir")
-        or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
-    )
+    # Placeholder for the top status summary (we fill it later)
+    status_box = st.empty()
 
     st.markdown("---")
 
     # -----------------------------
-    # Vector DB configuration
+    # 2) Vector DB configuration
     # -----------------------------
     st.header("Vector DB")
 
-    persist_dir_default = prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
     persist_dir = st.text_input(
         "Chroma path",
-        value=st.session_state.get("persist_dir", persist_dir_default),
+        value=st.session_state["persist_dir"],
         key="persist_dir",
         help="Directory where Chroma will store its collections.",
     )
@@ -806,7 +839,7 @@ def render_phase_embeddings_vectordb_page(prefs):
         return
 
     # -----------------------------
-    # Read existing collections
+    # 3) Read existing collections from Chroma
     # -----------------------------
     coll_options: list[str] = []
     try:
@@ -817,7 +850,7 @@ def render_phase_embeddings_vectordb_page(prefs):
         st.caption(f"Unable to read collections from '{persist_dir}': {e}")
 
     # -----------------------------
-    # Keep last selection / new name
+    # 4) Keep last selection / new name
     # -----------------------------
     last_sel = st.session_state.get("collection_selected")
     if not last_sel:
@@ -826,13 +859,14 @@ def render_phase_embeddings_vectordb_page(prefs):
     last_new = st.session_state.get("new_collection_name_input")
     if not last_new:
         last_new = prefs_dict.get("new_collection_name", DEFAULT_COLLECTION)
-        # initialize session_state once, then the widget will read from here
         st.session_state["new_collection_name_input"] = last_new
 
-    st.caption(f"Selected pref: {prefs_dict.get('collection_selected', '—')}  ·  Path: {persist_dir}")
+    st.caption(
+        f"Selected pref: {prefs_dict.get('collection_selected', '—')}  ·  Path: {persist_dir}"
+    )
 
     # -----------------------------
-    # Select / create collection
+    # 5) Select / create collection
     # -----------------------------
     if coll_options:
         opts = coll_options + [NEW_LABEL]
@@ -854,39 +888,36 @@ def render_phase_embeddings_vectordb_page(prefs):
         if sel == NEW_LABEL:
             new_name = st.text_input("New collection name", key="new_collection_name_input")
             st.caption("ℹ️ This collection will be physically created after you run **Index tickets** at least once.")
-            collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION            
-            st.session_state["collection_selected"] = collection_name
-            st.session_state["vs_collection"] = collection_name
+            collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION
         else:
             collection_name = sel
-            st.session_state["collection_selected"] = collection_name
-            st.session_state["vs_collection"] = collection_name
             st.session_state["after_delete_reset"] = True
     else:
         st.caption("No collection found. Create a new one:")
-        new_name = st.text_input("New collection", key="new_collection_name_input")
-        st.caption("ℹ️ This collection will be physically created after you run **Index tickets** at least once.")
-        collection_name = (st.session_state.get("new_collection_name_input") or "").strip() or DEFAULT_COLLECTION
-        st.session_state["collection_selected"] = collection_name
-        st.session_state["vs_collection"] = collection_name
+        st.text_input("New collection", key="new_collection_name_input")
+        st.caption(
+            "ℹ️ This collection will be physically created after you run **Index tickets** at least once."
+        )
+        collection_name = (
+            (st.session_state.get("new_collection_name_input") or "").strip()
+            or DEFAULT_COLLECTION
+        )
 
-    # --- Top status summary AFTER collection / embeddings state is resolved ---
+    # Single source of truth for collection in session_state
+    st.session_state["collection_selected"] = collection_name
+    st.session_state["vs_collection"] = collection_name
 
-    current_dir = (
-        st.session_state.get("persist_dir")
-        or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
-    )
-
+    # -----------------------------
+    # 6) Top status summary (AFTER collection is resolved)
+    # -----------------------------
     current_collection = st.session_state.get(
         "vs_collection",
         prefs_dict.get("collection_selected"),
     )
-
     current_provider = (
         st.session_state.get("emb_provider_select")
         or prefs_dict.get("emb_backend", "OpenAI")
     )
-
     current_model = (
         st.session_state.get("emb_model")
         or prefs_dict.get("emb_model_name", "")
@@ -898,7 +929,7 @@ def render_phase_embeddings_vectordb_page(prefs):
     )
 
     # -----------------------------
-    # Collection management: delete
+    # 7) Collection management: delete
     # -----------------------------
     st.markdown("---")
     st.subheader("Collection management")
@@ -937,7 +968,8 @@ def render_phase_embeddings_vectordb_page(prefs):
                     if os.path.exists(meta_path):
                         os.remove(meta_path)
                 except Exception:
-                    pass  # do not block the UX if meta deletion fails
+                    # Do not block the UX if meta deletion fails
+                    pass
 
                 # Clean state if it was pointing to the removed collection
                 if st.session_state.get("vs_collection") == collection_name:
@@ -972,7 +1004,7 @@ def render_phase_embeddings_vectordb_page(prefs):
     st.markdown("---")
 
     # -----------------------------
-    # Embeddings configuration
+    # 8) Embeddings configuration
     # -----------------------------
     st.header("Embeddings")
 
@@ -982,7 +1014,10 @@ def render_phase_embeddings_vectordb_page(prefs):
     emb_backends.append("OpenAI")
 
     pref_backend = prefs_dict.get("emb_backend") or "OpenAI"
-    if pref_backend == "Local (sentence-transformers)" and "Local (sentence-transformers)" not in emb_backends:
+    if (
+        pref_backend == "Local (sentence-transformers)"
+        and "Local (sentence-transformers)" not in emb_backends
+    ):
         pref_backend = "OpenAI"
 
     emb_backend = st.selectbox(
@@ -994,22 +1029,24 @@ def render_phase_embeddings_vectordb_page(prefs):
 
     # Reset the model ONLY if the user has just changed the provider
     prev_backend = st.session_state.get("_prev_emb_backend")
-
     if prev_backend is None:
         # First time: keep the existing model from prefs/session_state
         st.session_state["_prev_emb_backend"] = emb_backend
-
     elif prev_backend != emb_backend:
         # Real provider change → reset model accordingly
         st.session_state["_prev_emb_backend"] = emb_backend
         st.session_state["emb_model"] = (
-            "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small"
+            "all-MiniLM-L6-v2"
+            if emb_backend == "Local (sentence-transformers)"
+            else "text-embedding-3-small"
         )
 
     if "emb_model" not in st.session_state:
         st.session_state["emb_model"] = prefs_dict.get(
             "emb_model_name",
-            "all-MiniLM-L6-v2" if emb_backend == "Local (sentence-transformers)" else "text-embedding-3-small",
+            "all-MiniLM-L6-v2"
+            if emb_backend == "Local (sentence-transformers)"
+            else "text-embedding-3-small",
         )
 
     emb_model_options = (
@@ -1028,23 +1065,28 @@ def render_phase_embeddings_vectordb_page(prefs):
         key="emb_model",
     )
 
-    # Ingest
+    # -----------------------------
+    # 9) Vector DB indexing
+    # -----------------------------
     st.subheader("Vector DB Indexing")
-    # --- Embeddings backend/model for ingestion, chat and playbooks ---
+
+    # Embeddings backend/model for ingestion, chat and playbooks
     emb_backend = st.session_state.get(
         "emb_provider_select",
-        prefs.get("emb_backend", "OpenAI"),
+        prefs_dict.get("emb_backend", "OpenAI"),
     )
     emb_model_name = st.session_state.get(
         "emb_model",
-        prefs.get("emb_model_name", "text-embedding-3-small"),
+        prefs_dict.get("emb_model_name", "text-embedding-3-small"),
     )
 
     col1, col2 = st.columns([1, 3])
     with col1:
         start_ingest = st.button("Index tickets")
     with col2:
-        st.caption("Create ticket embeddings and save them to Chroma for semantic retrieval")
+        st.caption(
+            "Create ticket embeddings and save them to Chroma for semantic retrieval"
+        )
 
     # Read chunking configuration from session_state
     enable_chunking = bool(st.session_state.get("enable_chunking", True))
@@ -1058,19 +1100,29 @@ def render_phase_embeddings_vectordb_page(prefs):
             st.error("First load the project's tickets")
         else:
             try:
-                st.session_state["vector"] = VectorStore(persist_dir=persist_dir, collection_name=collection_name)
-                use_openai_embeddings = (emb_backend == "OpenAI")
-                st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
+                st.session_state["vector"] = VectorStore(
+                    persist_dir=persist_dir, collection_name=collection_name
+                )
+                use_openai_embeddings = emb_backend == "OpenAI"
+                st.session_state["embedder"] = EmbeddingBackend(
+                    use_openai=use_openai_embeddings, model_name=emb_model_name
+                )
+
                 # Save embeddings model metadata for consistency
                 try:
-                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
-                    meta = {"provider": st.session_state["embedder"].provider_name, "model": st.session_state["embedder"].model_name}
+                    meta_path = os.path.join(
+                        persist_dir, f"{collection_name}__meta.json"
+                    )
+                    meta = {
+                        "provider": st.session_state["embedder"].provider_name,
+                        "model": st.session_state["embedder"].model_name,
+                    }
                     with open(meta_path, "w", encoding="utf-8") as f:
                         json.dump(meta, f)
                 except Exception:
                     pass
 
-                # NEW: chunked indexing with metadata parent_id, chunk_id, pos
+                # Chunked indexing with metadata parent_id, chunk_id, pos
                 all_ids = []
                 all_docs = []
                 all_metas = []
@@ -1091,11 +1143,12 @@ def render_phase_embeddings_vectordb_page(prefs):
                     if not pieces:
                         pieces = [(0, full_text)]
 
-                    multi = len(pieces) > 1  # true se davvero abbiamo più chunk
+                    multi = len(pieces) > 1
 
                     for idx, (pos0, chunk_text) in enumerate(pieces, start=1):
-                        # usa ID semplice se non stai spezzando
-                        cid = f"{it.id_readable}::c{idx:03d}" if multi else it.id_readable
+                        cid = (
+                            f"{it.id_readable}::c{idx:03d}" if multi else it.id_readable
+                        )
 
                         all_ids.append(cid)
                         all_docs.append(chunk_text)
@@ -1107,24 +1160,47 @@ def render_phase_embeddings_vectordb_page(prefs):
                             "project": it.project,
                         }
                         if multi:
-                            meta["chunk_id"] = idx          # int
-                            meta["pos"] = int(pos0)         # int
+                            meta["chunk_id"] = idx
+                            meta["pos"] = int(pos0)
 
                         all_metas.append(meta)
-                        all_metas = [{k: v for k, v in m.items() if v is not None} for m in all_metas]
-                        embed_inputs.append(f"{it.id_readable} | {it.summary}\n\n{chunk_text}")
-                with st.spinner(f"Computing embeddings for {len(all_ids)} {'chunks' if enable_chunking else 'documents'} and saving to Chroma..."):
+                        all_metas = [
+                            {k: v for k, v in m.items() if v is not None}
+                            for m in all_metas
+                        ]
+                        embed_inputs.append(
+                            f"{it.id_readable} | {it.summary}\n\n{chunk_text}"
+                        )
+
+                with st.spinner(
+                    f"Computing embeddings for {len(all_ids)} "
+                    f"{'chunks' if enable_chunking else 'documents'} "
+                    "and saving to Chroma..."
+                ):
                     embs = st.session_state["embedder"].embed(embed_inputs)
-                    st.session_state["vector"].add(ids=all_ids, documents=all_docs, metadatas=all_metas, embeddings=embs)
-                # update counter
+                    st.session_state["vector"].add(
+                        ids=all_ids,
+                        documents=all_docs,
+                        metadatas=all_metas,
+                        embeddings=embs,
+                    )
+
+                # Update counter and active collection
                 st.session_state["vs_persist_dir"] = persist_dir
                 st.session_state["vs_collection"] = collection_name
                 st.session_state["vs_count"] = st.session_state["vector"].count()
+
                 # Store success status in session_state (will be displayed after rerun)
-                st.session_state["_index_success"] = f"Indexing completed. Total {'chunks' if enable_chunking else 'documents'}: {st.session_state['vs_count']}"
+                st.session_state["_index_success"] = (
+                    f"Indexing completed. Total "
+                    f"{'chunks' if enable_chunking else 'documents'}: "
+                    f"{st.session_state['vs_count']}"
+                )
+
                 # Stay in Phase 2 after rerun
                 st.session_state["ui_phase_choice"] = "Embeddings & Vector DB"
-                # Force rerun
+
+                # Force rerun so the status summary and sidebar reflect the updated info
                 st.rerun()
 
             except Exception as e:
@@ -1508,36 +1584,38 @@ def render_phase_llm_page(prefs):
 def render_phase_chat_page(prefs):
     import streamlit as st
 
-    # Normalize prefs to a dict
-    # Ensure vs_collection is initialized once at startup from prefs
-    if "vs_collection" not in st.session_state:
-        st.session_state["vs_collection"] = (
-            prefs_dict.get("collection_selected") or
-            prefs_dict.get("new_collection_name") or
-            None
-        )
-
+    # -----------------------------
+    # 1) Normalize prefs
+    # -----------------------------
     if isinstance(prefs, dict):
         prefs_dict = prefs
     else:
         prefs_dict = st.session_state.get("prefs", {})
 
-    # Persist dir and collection from session_state (with prefs fallback)
-    persist_dir = st.session_state.get(
-        "persist_dir",
-        prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR),
+    # -----------------------------
+    # 2) Persist dir & collection
+    # -----------------------------
+    persist_dir = (
+        st.session_state.get("vs_persist_dir")
+        or st.session_state.get("persist_dir")
+        or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
     )
 
-    collection_name = st.session_state.get(
-        "vs_collection",
-        st.session_state.get("new_collection_name_input", DEFAULT_COLLECTION),
+    collection_name = (
+        st.session_state.get("vs_collection")
+        or prefs_dict.get("collection_selected")
+        or st.session_state.get("new_collection_name_input")
+        or prefs_dict.get("new_collection_name", DEFAULT_COLLECTION)
     )
+    st.session_state["vs_collection"] = collection_name
 
     max_distance = float(
         st.session_state.get("max_distance", prefs_dict.get("max_distance", 0.9))
     )
 
-    # Embeddings backend/model for retrieval + memory
+    # -----------------------------
+    # 3) Embeddings + LLM config (UI / prefs view)
+    # -----------------------------
     emb_backend = st.session_state.get(
         "emb_provider_select",
         prefs_dict.get("emb_backend", "OpenAI"),
@@ -1547,7 +1625,6 @@ def render_phase_chat_page(prefs):
         prefs_dict.get("emb_model_name", "text-embedding-3-small"),
     )
 
-    # LLM provider/model/temperature for chat + playbooks
     llm_provider = st.session_state.get(
         "llm_provider_select",
         prefs_dict.get("llm_provider", "OpenAI"),
@@ -1563,7 +1640,10 @@ def render_phase_chat_page(prefs):
         ),
     )
 
-    st.title("Phase 6 – Chat & Results")
+    # -----------------------------
+    # 4) UI
+    # -----------------------------
+    st.title("Phase 5 – Chat & Results")
     st.write(
         "Ask questions about your YouTrack tickets. The app retrieves similar tickets "
         "from the vector store, sends them to the LLM, and shows the answer together "
@@ -1572,256 +1652,366 @@ def render_phase_chat_page(prefs):
 
     st.markdown("---")
 
-    # Chat
     st.subheader("RAG Chatbot")
-    query = st.text_area("New ticket", height=140, placeholder="Describe the problem as if opening a ticket")
+    query = st.text_area(
+        "New ticket",
+        height=140,
+        placeholder="Describe the problem as if opening a ticket",
+    )
     run_chat = st.button("Search and answer")
 
+    st.caption(
+        f"DEBUG: collection={collection_name}, "
+        f"vs_collection={st.session_state.get('vs_collection')}, "
+        f"vs_count={st.session_state.get('vs_count', 'n/a')}"
+    )
+
+    # -----------------------------
+    # 5) Click handler per la CHAT
+    # -----------------------------
     if run_chat:
         if not query.strip():
             st.error("Enter the ticket text")
-        elif not st.session_state.get("vector"):
+            return
+
+        # Ensure the vector store is open on the correct collection
+        vect = st.session_state.get("vector")
+        if (vect is None) or (st.session_state.get("vs_collection") != collection_name):
             ok, _, _ = open_vector_in_session(persist_dir, collection_name)
             if not ok:
-                st.error("Open or create a valid collection in the sidebar")
-        else:
-            try:
-                if st.session_state.get("embedder") is None:
-                    use_openai_embeddings = (emb_backend == "OpenAI")
-                    st.session_state["embedder"] = EmbeddingBackend(
-                        use_openai=use_openai_embeddings,
-                        model_name=emb_model_name
-                    )
+                st.error(
+                    "Open or create a valid collection in Phase 2 (Embeddings & Vector DB)."
+                )
+                return
 
-                # Warn if the current model differs from the one used for indexing
+        # --- DEBUG: list Chroma collections and counts ---
+        try:
+            _client = get_chroma_client(persist_dir)
+            debug_cols = []
+            for c in _client.list_collections():
                 try:
-                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
-                    if os.path.exists(meta_path):
-                        with open(meta_path, "r", encoding="utf-8") as f:
-                            m = json.load(f)
-                        if (m.get("provider") != st.session_state["embedder"].provider_name) or \
-                        (m.get("model") != st.session_state["embedder"].model_name):
-                            st.info(
-                                f"Note: the collection was indexed with {m.get('provider')} / {m.get('model')}; "
-                                f"you are querying with {st.session_state['embedder'].provider_name} / "
-                                f"{st.session_state['embedder'].model_name}."
-                            )
+                    n = c.count()
                 except Exception:
-                    pass
+                    n = "?"
+                debug_cols.append(f"{c.name} ({n})")
+            if debug_cols:
+                st.caption("DEBUG Chroma collections: " + ", ".join(debug_cols))
+        except Exception:
+            pass
 
-                # Retrieval
-                q_emb = st.session_state["embedder"].embed([query])
+        try:
+            # -----------------------------
+            # 6) Build embedder fresh (prefer meta over prefs)
+            # -----------------------------
+            meta_provider = None
+            meta_model = None
+            try:
+                meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+                if os.path.exists(meta_path):
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        m = json.load(f)
+                    meta_provider = m.get("provider")
+                    meta_model = m.get("model")
+            except Exception:
+                meta_provider = None
+                meta_model = None
 
-                # 1) KB
-                top_k = int(st.session_state.get("top_k", 5))
-                show_distances = bool(st.session_state.get("show_distances", False))
-                kb_res = st.session_state["vector"].query(query_embeddings=q_emb, n_results=top_k)
-                kb_docs  = kb_res.get("documents", [[]])[0]
-                kb_metas = kb_res.get("metadatas", [[]])[0]
-                kb_dists = kb_res.get("distances", [[]])[0]
+            provider_for_embed = meta_provider or emb_backend
+            model_for_embed = meta_model or emb_model_name
 
-                max_distance = float(st.session_state.get("max_distance", prefs.get("max_distance", 0.9)))
-                DIST_MAX_KB = max_distance
-                kb_retrieved = [
-                    (doc, meta, dist, "KB")
-                    for doc, meta, dist in zip(kb_docs, kb_metas, kb_dists)
-                    if dist is not None and dist <= DIST_MAX_KB
+            use_openai_embeddings = (str(provider_for_embed).lower() == "openai")
+            embedder = EmbeddingBackend(
+                use_openai=use_openai_embeddings,
+                model_name=model_for_embed,
+            )
+            st.session_state["embedder"] = embedder
+
+            # Info se ancora c'è mismatch col meta
+            try:
+                if meta_provider and meta_model:
+                    if (
+                        meta_provider != embedder.provider_name
+                        or meta_model != embedder.model_name
+                    ):
+                        st.info(
+                            f"Note: the collection was indexed with {meta_provider} / {meta_model}; "
+                            f"you are querying with {embedder.provider_name} / {embedder.model_name}."
+                        )
+            except Exception:
+                pass
+
+            # -----------------------------
+            # 7) Retrieval
+            # -----------------------------
+            q_emb = embedder.embed([query])
+
+            top_k = int(st.session_state.get("top_k", 5))
+            show_distances = bool(st.session_state.get("show_distances", False))
+
+            # KB
+            _client = get_chroma_client(persist_dir)
+            kb_coll = _client.get_or_create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+
+            kb_res = kb_coll.query(
+                query_embeddings=q_emb,
+                n_results=top_k,
+            )
+            kb_docs = kb_res.get("documents", [[]])[0]
+            kb_metas = kb_res.get("metadatas", [[]])[0]
+            kb_dists = kb_res.get("distances", [[]])[0]
+
+            st.caption(
+                f"DEBUG KB: raw_n={len(kb_docs)}, "
+                f"count={kb_coll.count()}, "
+                f"dists[0:5]={kb_dists[:5]} (max_distance={max_distance})"
+            )
+
+            DIST_MAX_KB = max_distance
+            kb_retrieved = [
+                (doc, meta, dist, "KB")
+                for doc, meta, dist in zip(kb_docs, kb_metas, kb_dists)
+                if dist is not None and dist <= DIST_MAX_KB
+            ]
+
+            # MEMORIES
+            mem_retrieved = []
+            if st.session_state.get("enable_memory", False):
+                try:
+                    mem_client = get_chroma_client(persist_dir)
+                    mem_coll = mem_client.get_or_create_collection(
+                        name=MEM_COLLECTION,
+                        metadata={"hnsw:space": "cosine"},
+                    )
+
+                    mem_res = mem_coll.query(
+                        query_embeddings=q_emb,
+                        n_results=min(5, top_k),
+                    )
+                    mem_docs = mem_res.get("documents", [[]])[0]
+                    mem_metas = mem_res.get("metadatas", [[]])[0]
+                    mem_dists = mem_res.get("distances", [[]])[0]
+
+                    st.caption(
+                        f"DEBUG MEM: raw_n={len(mem_docs)}, "
+                        f"count={mem_coll.count()}, "
+                        f"dists[0:5]={mem_dists[:5]}"
+                    )
+
+                    DIST_MAX_MEM = DIST_MAX_KB
+                    now = now_ts()
+                    for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
+                        if dist is None:
+                            continue
+                        meta = meta or {}
+                        exp = int(meta.get("expires_at", 0))
+                        if exp and exp < now:
+                            continue
+                        if dist <= DIST_MAX_MEM:
+                            mem_retrieved.append((doc, meta, dist, "MEM"))
+                except Exception as e:
+                    st.caption(f"DEBUG MEM error: {e}")
+
+            # Merge MEM + KB
+            mem_cap = 2
+            merged = sorted(mem_retrieved, key=lambda x: x[2])[:mem_cap] + sorted(
+                kb_retrieved, key=lambda x: x[2]
+            )[: max(0, top_k - min(mem_cap, len(mem_retrieved)))]
+
+            # -----------------------------
+            # 8) Prompt build
+            # -----------------------------
+            if merged:
+                merged_collapsed_view = collapse_by_parent(
+                    merged,
+                    per_parent=int(st.session_state.get("per_parent_display", 1)),
+                    stitch_for_prompt=False,
+                )
+
+                merged_for_prompt = collapse_by_parent(
+                    merged,
+                    per_parent=int(st.session_state.get("per_parent_prompt", 3)),
+                    stitch_for_prompt=True,
+                    max_chars=int(st.session_state.get("stitch_max_chars", 1500)),
+                )
+
+                retrieved_for_prompt = [
+                    (doc, meta, dist) for (doc, meta, dist, _src) in merged_for_prompt
                 ]
+                prompt = build_prompt(query, retrieved_for_prompt)
+            else:
+                merged_collapsed_view = []
+                merged_for_prompt = []
+                prompt = (
+                    f"New ticket:\n{query.strip()}\n\n"
+                    "No similar ticket was found in the knowledge base."
+                )
 
-                # 2) MEMORIES (if enabled)
-                mem_retrieved = []
-                if st.session_state.get("enable_memory", False):
-                    try:
-                        _client = get_chroma_client(persist_dir)
-                        _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
-                        mem_res = _mem.query(query_embeddings=q_emb, n_results=min(5, top_k))
-                        mem_docs  = mem_res.get("documents", [[]])[0]
-                        mem_metas = mem_res.get("metadatas", [[]])[0]
-                        mem_dists = mem_res.get("distances", [[]])[0]
+            st.write(
+                f"DEBUG: view={len(merged_collapsed_view)}, "
+                f"prompt_ctx={len(merged_for_prompt)}"
+            )
 
-                        DIST_MAX_MEM = DIST_MAX_KB
-                        now = now_ts()
-                        for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
-                            if dist is None:
-                                continue
-                            meta = meta or {}
-                            exp = int(meta.get("expires_at", 0))
-                            if exp and exp < now:
-                                continue
-                            if dist <= DIST_MAX_MEM:
-                                mem_retrieved.append((doc, meta, dist, "MEM"))
-                    except Exception:
-                        pass  # memory is optional
+            if st.session_state.get("show_prompt", False):
+                with st.expander("Prompt sent to the LLM", expanded=False):
+                    st.code(prompt, language="markdown")
 
-                # 3) Merge: max 2 mem, then KB up to top_k
-                mem_cap = 2
-                merged = sorted(mem_retrieved, key=lambda x: x[2])[:mem_cap] + \
-                        sorted(kb_retrieved, key=lambda x: x[2])[:max(0, top_k - min(mem_cap, len(mem_retrieved)))]
+            # -----------------------------
+            # 9) LLM answer
+            # -----------------------------
+            _model = (llm_model or "").strip()
+            if not _model:
+                raise RuntimeError(
+                    "LLM model not set: select a valid model in the LLM phase."
+                )
 
-                # 4) Prompt
+            llm = LLMBackend(llm_provider, _model, temperature=llm_temperature)
+            with st.spinner("Generating answer."):
+                answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
+            st.write(answer)
+            st.session_state["last_query"] = query
+            st.session_state["last_answer"] = answer
 
-                if merged:
+            # -----------------------------
+            # 10) Similar results with provenance
+            # -----------------------------
+            if merged:
+                base_url = (
+                    st.session_state.get("yt_client").base_url
+                    if st.session_state.get("yt_client")
+                    else ""
+                ).rstrip("/")
+                st.write("Similar results (top-k, with provenance):")
+                for (doc, meta, dist, src) in merged_collapsed_view:
+                    if src == "KB":
+                        idr = meta.get("id_readable", "")
+                        summary = meta.get("summary", "")
+                        url = f"{base_url}/issue/{idr}" if base_url and idr else ""
 
-                    # Collapse duplicates by ticket for DISPLAY
+                        cid = meta.get("chunk_id")
+                        cpos = meta.get("pos")
 
-                    merged_collapsed_view = collapse_by_parent(
+                        header = (
+                            f"{idr} – {summary}"
+                            if idr and summary
+                            else (idr or summary or "KB result")
+                        )
+                        if url:
+                            st.markdown(f"- [{header}]({url})")
+                        else:
+                            st.markdown(f"- {header}")
 
-                        merged,
+                        if show_distances:
+                            st.caption(f"Distance: {dist:.4f}")
 
-                        per_parent=int(st.session_state.get("per_parent_display", 1)),
+                        if cid is not None and cpos is not None:
+                            st.caption(f"Chunk #{cid} (token offset: {cpos})")
 
-                        stitch_for_prompt=False,
+                        with st.expander("View chunk text", expanded=False):
+                            st.write(doc)
 
-                    )
+                    else:  # MEM
+                        title = meta.get("title", "Saved playbook")
+                        st.markdown(f"- 🧠 **Playbook** – {title}")
+                        if show_distances:
+                            st.caption(f"Distance: {dist:.4f}")
+                        if st.session_state.get("mem_show_full", False):
+                            with st.expander("View playbook text", expanded=False):
+                                st.write(doc)
 
+        except Exception as e:
+            st.error(f"Chat error: {e}")
 
-                    # Collapse and stitch for PROMPT context
-
-                    merged_for_prompt = collapse_by_parent(
-
-                        merged,
-
-                        per_parent=int(st.session_state.get("per_parent_prompt", 3)),
-
-                        stitch_for_prompt=True,
-
-                        max_chars=int(st.session_state.get("stitch_max_chars", 1500)),
-
-                    )
-
-
-                    retrieved_for_prompt = [(doc, meta, dist) for (doc, meta, dist, _src) in merged_for_prompt]
-
-                    prompt = build_prompt(query, retrieved_for_prompt)
-
-                else:
-
-                    merged_collapsed_view = []
-
-                    prompt = f"New ticket:\n{query.strip()}\n\nNo similar ticket was found in the knowledge base."
-
-                st.write(f"DEBUG: view={len(merged_collapsed_view)}, prompt_ctx={len(merged_for_prompt) if merged else 0}")
-
-                if st.session_state.get("show_prompt", False):
-                    with st.expander("Prompt sent to the LLM", expanded=False):
-                        st.code(prompt, language="markdown")
-
-                # LLM
-                _model = (llm_model or "").strip()
-                if not _model:
-                    raise RuntimeError("LLM model not set: select a valid model in the sidebar.")
-
-                llm = LLMBackend(llm_provider, _model, temperature=llm_temperature)
-                with st.spinner("Generating answer..."):
-                    answer = llm.generate(RAG_SYSTEM_PROMPT, prompt)
-                st.write(answer)
-                # store the last Q/A for saving outside the if run_chat
-                st.session_state["last_query"] = query
-                st.session_state["last_answer"] = answer
-
-                # 5) Similar results with provenance
-                if merged:
-                    base_url = (st.session_state.get("yt_client").base_url if st.session_state.get("yt_client") else "").rstrip("/")
-                    st.write("Similar results (top-k, with provenance):")
-                    for (doc, meta, dist, src) in merged_collapsed_view:
-                        if src == "KB":
-                            idr = meta.get("id_readable", "")
-                            summary = meta.get("summary", "")
-                            url = f"{base_url}/issue/{idr}" if base_url and idr else ""
-
-
-                            cid = meta.get("chunk_id")
-                            cpos = meta.get("pos")
-                            extra = f" · chunk {cid} @tok {cpos}" if cid else " · document"
-                            if url:
-                                if st.session_state.get("show_distances", False):
-                                    st.markdown(f"- [KB] [{idr}]({url}) — distance={dist:.3f}{extra} — {summary}")
-                                else:
-                                    st.markdown(f"- [KB] [{idr}]({url}){extra} — {summary}")
-                            else:
-                                if st.session_state.get("show_distances", False):
-                                    st.write(f"- [KB] {idr} — distance={dist:.3f}{extra} — {summary}")
-                                else:
-                                    st.write(f"- [KB] {idr}{extra} — {summary}")
-
-                        else:  # MEM
-                            # single-line preview, no nested bullets
-                            preview = one_line_preview(doc, maxlen=160)
-                            proj = meta.get("project", "")
-                            raw_tags = meta.get("tags", "")
-                            tags = raw_tags if isinstance(raw_tags, str) else ", ".join(raw_tags) if raw_tags else ""
-                            extra = f" (tags: {tags})" if tags else (f" (proj: {proj})" if proj else "")
-                            if st.session_state.get("show_distances", False):
-                                st.markdown(f"- [MEM]{extra} — distance={dist:.3f} — {preview}")
-                            else:
-                                st.markdown(f"- [MEM]{extra} — {preview}")
-
-                            # Optional expander with full text
-                            if st.session_state.get("mem_show_full", False):
-                                with st.expander("Full playbook [MEM]", expanded=False):
-                                    # the playbook may contain markdown bullets; render as markdown
-                                    st.markdown(doc)
-
-                else:
-                    st.caption("No sufficiently similar result (below threshold).")
-
-            except Exception as e:
-                st.error(f"Chat error: {e}")
-    # --- Persistent button to save the playbook (outside the if run_chat) ---
+    # -----------------------------
+    # 11) Save as playbook
+    # -----------------------------
     if st.session_state.get("enable_memory", False) and st.session_state.get("last_answer"):
         st.markdown("---")
         if st.button("✅ Mark as solved → Save as playbook"):
             try:
-                query  = st.session_state.get("last_query", "") or ""
+                query = st.session_state.get("last_query", "") or ""
                 answer = st.session_state.get("last_answer", "") or ""
+
                 condense_prompt = (
-                    "Summarize the solution in 3–6 imperative, reusable sentences, avoiding sensitive data.\n"
-                    f"- Query: {query.strip()}\n- Risposta:\n{answer}\n\n"
+                    "Summarize the solution in 3–6 imperative, reusable sentences, "
+                    "avoiding sensitive data.\n"
+                    f"- Query: {query.strip()}\n- Answer:\n{answer}\n\n"
                     "Output: bulleted list of clear steps."
                 )
-                # use the model already validated in chat
+
                 _model = (st.session_state.get("llm_model") or "").strip()
                 if not _model:
-                    _model = DEFAULT_LLM_MODEL if st.session_state.get("last_llm_provider","OpenAI") == "OpenAI" else DEFAULT_OLLAMA_MODEL
+                    prov = st.session_state.get("llm_provider_select", "OpenAI")
+                    _model = DEFAULT_LLM_MODEL if prov == "OpenAI" else DEFAULT_OLLAMA_MODEL
 
                 try:
-                    llm_mem = LLMBackend(llm_provider, _model, temperature=max(0.1, llm_temperature - 0.1))
+                    llm_mem = LLMBackend(
+                        llm_provider,
+                        _model,
+                        temperature=max(0.1, llm_temperature - 0.1),
+                    )
                     playbook_text = llm_mem.generate(
                         "You are an assistant who distills reusable mini-playbooks.",
-                        condense_prompt
+                        condense_prompt,
                     ).strip()
                 except Exception:
                     playbook_text = (answer[:800] + "…") if len(answer) > 800 else answer
 
                 if not playbook_text.strip():
                     st.warning("No content to save.")
-                else:
-                    curr_proj = st.session_state.get("last_project_key") or ""
-                    tags_list = ["playbook"] + ([curr_proj] if curr_proj else [])
+                    return
 
-                    meta = {
-                        "source": "memory",
-                        "project": curr_proj,
-                        "quality": "verified",
-                        "created_at": now_ts(),
-                        "expires_at": ts_in_days(st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)),
-                        "tags": ",".join(tags_list),  # <-- CSV instead of list
-                    }
+                curr_proj = st.session_state.get("last_project_key") or ""
+                tags_list = ["playbook"] + ([curr_proj] if curr_proj else [])
 
-                    if st.session_state.get("embedder") is None:
-                        use_openai_embeddings = (emb_backend == "OpenAI")
-                        st.session_state["embedder"] = EmbeddingBackend(use_openai=use_openai_embeddings, model_name=emb_model_name)
-                    mem_emb = st.session_state["embedder"].embed([playbook_text])[0]
+                meta = {
+                    "source": "memory",
+                    "project": curr_proj,
+                    "quality": "verified",
+                    "created_at": now_ts(),
+                    "expires_at": ts_in_days(
+                        st.session_state.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)
+                    ),
+                    "tags": ",".join(tags_list),
+                }
 
-                    _client = get_chroma_client(persist_dir)
-                    _mem = _client.get_or_create_collection(name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"})
-                    mem_id = f"mem::{uuid.uuid4().hex[:12]}"
-                    _mem.add(ids=[mem_id], documents=[playbook_text], metadatas=[meta], embeddings=[mem_emb])
+                if st.session_state.get("embedder") is None:
+                    use_openai_embeddings = (emb_backend == "OpenAI")
+                    st.session_state["embedder"] = EmbeddingBackend(
+                        use_openai=use_openai_embeddings,
+                        model_name=emb_model_name,
+                    )
 
-                    st.caption(f"Saved playbook in path='{persist_dir}', collection='{MEM_COLLECTION}'")
-                    st.success("Playbook saved in memory.")
-                    st.session_state["open_memories_after_save"] = True
-                    st.rerun()                                  # refresh table
+                mem_emb = st.session_state["embedder"].embed([playbook_text])[0]
+
+                _client = get_chroma_client(persist_dir)
+                mem_coll = _client.get_or_create_collection(
+                    name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"}
+                )
+                mem_id = f"mem::{uuid.uuid4().hex[:12]}"
+                mem_coll.add(
+                    ids=[mem_id],
+                    documents=[playbook_text],
+                    metadatas=[meta],
+                    embeddings=[mem_emb],
+                )
+
+                mem_count = 0
+                try:
+                    mem_count = mem_coll.count()
+                except Exception:
+                    pass
+
+                st.caption(
+                    f"Saved playbook in path='{persist_dir}', "
+                    f"collection='{MEM_COLLECTION}', count={mem_count}"
+                )
+                st.success("Playbook saved in memory.")
+
+                st.session_state["open_memories_after_save"] = True
+                st.rerun()
             except Exception as e:
                 st.error(f"Errore salvataggio playbook: {e}")
 
@@ -1830,14 +2020,14 @@ def render_phase_solutions_memory_page(prefs):
 
     # 1) prefs_dict: dai priorità a quelli in session_state
     if isinstance(prefs, dict):
-        prefs_dict = st.session_state.get("prefs", prefs)
+        prefs_dict = prefs
     else:
         prefs_dict = st.session_state.get("prefs", {})
 
-    # 2) Persist dir per la collection dei playbook
-    persist_dir = st.session_state.get(
-        "persist_dir",
-        prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR),
+    persist_dir = (
+        st.session_state.get("vs_persist_dir")
+        or st.session_state.get("persist_dir")
+        or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
     )
 
     # 3) Bootstrap UNA SOLA VOLTA i valori in session_state dai prefs
@@ -1917,25 +2107,21 @@ def render_phase_solutions_memory_page(prefs):
     if st.session_state.get("show_memories"):
         st.subheader("Saved playbooks (memories)")
         try:
-            _client = get_chroma_client(persist_dir)
-            _mem = _client.get_or_create_collection(
-                name=MEM_COLLECTION,
-                metadata={"hnsw:space": "cosine"},
+            client = get_chroma_client(persist_dir)
+            mem_coll = client.get_or_create_collection(
+                name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"}
             )
+            count = mem_coll.count()
+            st.caption(f"Collection: '{MEM_COLLECTION}' — path: {persist_dir} — count: {count}")
 
-            total = _mem.count()
-            st.caption(
-                f"Collection: '{MEM_COLLECTION}' — path: {persist_dir} — count: {total}"
-            )
-
-            data = _mem.get(include=["documents", "metadatas"], limit=max(200, total))
+            data = mem_coll.get(include=["documents", "metadatas"], limit=max(200, count))
             ids = data.get("ids") or []
             docs = data.get("documents") or []
             metas = data.get("metadatas") or []
 
-            if total > 0 and not ids:
+            if count > 0 and not ids:
                 st.warning("La collection riporta count>0 ma get() è vuoto. Riprovo senza include…")
-                data = _mem.get(limit=max(200, total))  # fallback
+                data = mem_coll.get(limit=max(200, count))  # fallback
                 ids = data.get("ids") or []
                 docs = data.get("documents") or []
                 metas = data.get("metadatas") or []
