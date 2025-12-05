@@ -2480,7 +2480,23 @@ def run_streamlit_app():
         st.markdown("### Vector DB / Embeddings status")
 
         persist_dir = st.session_state.get("persist_dir", prefs.get("persist_dir", ""))
-        vs_collection = st.session_state.get("vs_collection", "")
+
+        # Prefer the active collection in session; if missing, fallback to prefs
+        vs_collection = st.session_state.get("vs_collection")
+        if not vs_collection:
+            # Try collection_selected stored in prefs
+            pref_coll = None
+            if isinstance(prefs, dict):
+                pref_coll = (prefs.get("collection_selected") or "").strip()
+                if not pref_coll:
+                    pref_coll = (prefs.get("new_collection_name") or "").strip()
+            if pref_coll:
+                vs_collection = pref_coll
+                st.session_state["vs_collection"] = pref_coll
+                st.session_state.setdefault("collection_selected", pref_coll)
+            else:
+                vs_collection = ""
+
         emb_provider = st.session_state.get("emb_provider_select", "OpenAI")
         emb_model = st.session_state.get("emb_model", "")
 
@@ -2488,6 +2504,7 @@ def run_streamlit_app():
             st.success(f"Collection: {vs_collection}")
         else:
             st.warning("No collection selected")
+
 
         st.caption(persist_dir or "No Chroma path configured")
         st.caption(f"Embeddings: {emb_provider} · {emb_model or 'n/a'}")
@@ -2616,18 +2633,30 @@ def run_streamlit_app():
                 os._exit(0)
 
         # Automatic opening of the selected collection (without re-indexing)
-        # Avoid opening if the user has chosen "Create new…" but has not entered a name different from the default
+        # Avoid opening if the user has chosen "Create new…" but has not entered a name
         vector_ready = False
-        # Read persist_dir and collection name from session_state
+
         persist_dir = st.session_state.get(
             "persist_dir",
             prefs.get("persist_dir", DEFAULT_CHROMA_DIR) if isinstance(prefs, dict) else DEFAULT_CHROMA_DIR,
         )
 
-        collection_name = (
-            st.session_state.get("vs_collection")
-            or st.session_state.get("new_collection_name_input", DEFAULT_COLLECTION)
-        )
+        # Determine the effective collection name:
+        # 1) active vs_collection
+        # 2) collection_selected from prefs/session
+        # 3) new_collection_name_input / default
+        if "vs_collection" in st.session_state and st.session_state["vs_collection"]:
+            collection_name = st.session_state["vs_collection"]
+        else:
+            pref_coll = None
+            if isinstance(prefs, dict):
+                pref_coll = (prefs.get("collection_selected") or "").strip()
+                if not pref_coll:
+                    pref_coll = (prefs.get("new_collection_name") or "").strip()
+            collection_name = (
+                pref_coll
+                or st.session_state.get("new_collection_name_input", DEFAULT_COLLECTION)
+            )
 
         if persist_dir and collection_name:
             changed = (
@@ -2636,21 +2665,32 @@ def run_streamlit_app():
                 or st.session_state.get("vector") is None
             )
 
-            # Do not open if we are on NEW_LABEL and the name is empty (or only default) and does not yet exist
-            if st.session_state.get("collection_selected") == NEW_LABEL and (collection_name == "" or collection_name == DEFAULT_COLLECTION):
-                pass  # wait for the user to click "Index" to create the new collection
+            # Do not autoload if user explicitly selected "Create new collection..."
+            # and the name is still empty / default. Use collection_select (the widget),
+            # not collection_selected (which is always a real name).
+            if (
+                st.session_state.get("collection_select") == NEW_LABEL
+                and (not collection_name or collection_name == DEFAULT_COLLECTION)
+            ):
+                pass  # wait for "Index tickets" to create the new collection
             else:
                 if changed:
                     ok, cnt, err = open_vector_in_session(persist_dir, collection_name)
                     vector_ready = ok
                     if ok:
-                        st.caption(f"Collection '{collection_name}' opened. Indexed documents: {cnt if cnt>=0 else 'N/A'}")
+                        st.caption(
+                            f"Collection '{collection_name}' opened. "
+                            f"Indexed documents: {cnt if cnt >= 0 else 'N/A'}"
+                        )
                     else:
                         st.caption(f"Unable to open the collection: {err}")
                 else:
                     vector_ready = True
                     cnt = st.session_state.get("vs_count", -1)
-                    st.caption(f"Collection '{collection_name}' ready. Indexed documents: {cnt if cnt>=0 else 'N/A'}")
+                    st.caption(
+                        f"Collection '{collection_name}' ready. "
+                        f"Indexed documents: {cnt if cnt >= 0 else 'N/A'}"
+                    )
 
         if quit_btn:
             st.write("Closing application...")
