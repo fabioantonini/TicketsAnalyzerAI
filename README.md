@@ -132,7 +132,7 @@ Under the “Advanced settings” expander:
 
 There is also a **“Reset to defaults”** button that restores recommended values and shows a toast.
 
-All these settings are synced to canonical keys used by the Chat phase (`top_k`, `show_distances`, `collapse_duplicates`, `per_parent_display`, `per_parent_prompt`, `stitch_max_chars`) and are persisted in prefs.citeturn1file0  
+All these settings are synced to canonical keys used by the Chat phase (`top_k`, `show_distances`, `collapse_duplicates`, `per_parent_display`, `per_parent_prompt`, `stitch_max_chars`) and are persisted in prefs. 
 
 ---
 
