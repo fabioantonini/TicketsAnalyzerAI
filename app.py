@@ -349,6 +349,41 @@ DEFAULT_OLLAMA_MODEL = "llama3.2"
 NEW_LABEL = "➕ Create new collection..."
 
 # ------------------------------
+# Pastel colors per phase (UI)
+# ------------------------------
+PHASE_COLORS = {
+    "YouTrack connection":      "#F0F4FF",  # light blue
+    "Embeddings & Vector DB":   "#F9F5FF",  # light lilac
+    "Retrieval configuration":  "#FFF7E6",  # light cream
+    "LLM & API keys":           "#E8FFF0",  # light sage
+    "Solutions memory":         "#FFF0F3",  # light pink
+    "Chat & Results":           "#E6FAFF",  # light cyan
+    "Preferences & debug":      "#F6F6F6",  # neutral grey
+}
+
+def phase_container_start(phase_label: str):
+    """Start a colored container for the given phase."""
+    import streamlit as st
+    color = PHASE_COLORS.get(phase_label, "#F6F6F6")
+    st.markdown(
+        f"""
+        <div style="
+            background-color:{color};
+            padding: 1.5rem 1.8rem;
+            border-radius: 18px;
+            border: 1px solid rgba(0,0,0,0.04);
+            margin-top: 0.75rem;
+        ">
+        """,
+        unsafe_allow_html=True,
+    )
+
+def phase_container_end():
+    """Close the colored phase container."""
+    import streamlit as st
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ------------------------------
 # YouTrack Client + DTO
 # ------------------------------
 @dataclass
@@ -2404,32 +2439,32 @@ def run_streamlit_app():
     yt_token = st.session_state.get("yt_token", "")
     connect = False
 
+    # Open colored container for the current phase
+    phase_container_start(phase)
+
     if phase == "YouTrack connection":
         yt_url, yt_token, connect = render_phase_yt_connection_page(prefs)
 
-    # Phase 2 – Embeddings & Vector DB (page)
-    if phase == "Embeddings & Vector DB":
+    elif phase == "Embeddings & Vector DB":
         render_phase_embeddings_vectordb_page(prefs)
 
-    # Phase 3 – Retrieval configuration (page)
-    if phase == "Retrieval configuration":
+    elif phase == "Retrieval configuration":
         render_phase_retrieval_page(prefs)
 
-    # Phase 4 – LLM & API keys (page)
-    if phase == "LLM & API keys":
+    elif phase == "LLM & API keys":
         render_phase_llm_page(prefs)
 
-    # Phase 5 – Chat & Results (page)
-    if phase == "Chat & Results":
+    elif phase == "Chat & Results":
         render_phase_chat_page(prefs)
 
-    # Phase 6 - Solutions memory (page)
-    if phase == "Solutions memory":
+    elif phase == "Solutions memory":
         render_phase_solutions_memory_page(prefs)
 
-    # Phase 7 - Preferences and debug (page)
-    if phase == "Preferences & debug":
+    elif phase == "Preferences & debug":
         render_phase_preferences_debug_page(prefs)
+
+    # Close colored container
+    phase_container_end()
 
     with st.sidebar:
         # --- Wizard-style navigation (visual only, all sections still visible) ---
