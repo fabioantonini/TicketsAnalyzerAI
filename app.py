@@ -361,6 +361,55 @@ PHASE_COLORS = {
     "Preferences & debug":      "#F6F6F6",  # neutral grey
 }
 
+# Icons for phases (used in sidebar radio)
+PHASE_ICONS = {
+    "YouTrack connection":      "🔗",
+    "Embeddings & Vector DB":   "🧩",
+    "Retrieval configuration":  "🔍",
+    "LLM & API keys":           "🔑",
+    "Solutions memory":         "💾",
+    "Chat & Results":           "💬",
+    "Preferences & debug":      "⚙️",
+}
+
+def inject_global_css():
+    """Inject a small global CSS theme for a more modern look."""
+    import streamlit as st
+    st.markdown(
+        """
+        <style>
+        /* Global page background and typography */
+        body {
+            background-color: #F7F9FC;
+        }
+        h1, h2, h3 {
+            color: #1F2933;
+        }
+
+        /* Primary buttons */
+        div.stButton > button:first-child {
+            background-color: #4361EE;
+            color: white;
+            border-radius: 10px;
+            padding: 0.4rem 1.1rem;
+            border: none;
+            font-weight: 500;
+        }
+        div.stButton > button:first-child:hover {
+            background-color: #3554D1;
+        }
+
+        /* Sidebar titles a bit smaller */
+        section[data-testid="stSidebar"] h1, 
+        section[data-testid="stSidebar"] h2, 
+        section[data-testid="stSidebar"] h3 {
+            font-size: 0.95rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def phase_container_start(phase_label: str):
     """Start a colored container for the given phase."""
     import streamlit as st
@@ -2341,6 +2390,7 @@ def render_phase_preferences_debug_page(prefs):
 # ------------------------------
 def run_streamlit_app():
     st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
+    inject_global_css()
     init_prefs_in_session()
     # === Robust prefs loading & one-time bootstrap ===
     DEFAULT_PREFS = {
@@ -2488,7 +2538,9 @@ def run_streamlit_app():
         current_phase = st.radio(
             "Current phase",
             options=PHASES,
-            key="ui_phase_choice"
+            key="ui_phase_choice",
+            format_func=lambda p: f"{PHASE_ICONS.get(p, '•')} {p}",
+            help="Select the current configuration phase.",
         )
 
         if isinstance(current_phase, str):
