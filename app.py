@@ -2100,6 +2100,7 @@ def render_phase_chat_page(prefs):
 
 def render_phase_solutions_memory_page(prefs):
     import streamlit as st
+    from datetime import datetime
 
     # 1) prefs_dict: dai priorità a quelli in session_state
     if isinstance(prefs, dict):
@@ -2186,7 +2187,7 @@ def render_phase_solutions_memory_page(prefs):
 
     st.markdown("---")
 
-    # 5) Tabella dei playbook solo se attivata
+    # 5) Tabella/Lista dei playbook solo se attivata
     if st.session_state.get("show_memories"):
         st.subheader("Saved playbooks (memories)")
         try:
@@ -2212,12 +2213,9 @@ def render_phase_solutions_memory_page(prefs):
             if not ids:
                 st.caption("Nessun playbook salvato.")
             else:
-                from datetime import datetime
-                import pandas as pd
-
-                rows = []
                 for _id, doc, meta in zip(ids, docs, metas):
                     meta = meta or {}
+
                     created = meta.get("created_at")
                     expires = meta.get("expires_at")
 
@@ -2232,20 +2230,41 @@ def render_phase_solutions_memory_page(prefs):
                     else:
                         tags = ""
 
+                    project = meta.get("project", "")
                     prev = (doc[:120] + "…") if doc and len(doc) > 120 else (doc or "")
 
-                    rows.append(
-                        {
-                            "ID": _id,
-                            "Project": meta.get("project", ""),
-                            "Tags": tags,
-                            "Created": created_s,
-                            "Expires": expires_s,
-                            "Preview": prev,
-                        }
-                    )
+                    col_main, col_trash = st.columns([0.94, 0.06])
 
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                    with col_main:
+                        st.markdown(f"Project: {project or '—'}")
+                        if tags:
+                            st.caption(f"Tags: {tags}")
+                        st.caption(
+                            f"Created: {created_s or '—'}  —  Expires: {expires_s or '—'}"
+                        )
+                        st.markdown(f"Preview: {prev}")
+
+                        # Optional full text of the playbook
+                        if mem_show_full and doc:
+                            with st.expander("Show full playbook"):
+                                st.markdown(doc)
+
+                        # Optional small ID for debugging
+                        st.caption(f"ID: `{_id}`")
+
+                    with col_trash:
+                        if st.button(
+                            "🗑️",
+                            key=f"mem_delete_{_id}",
+                            help="Delete this playbook",
+                        ):
+                            try:
+                                # Atomic delete of a single solution memory
+                                mem_coll.delete(ids=[_id])
+                                st.success("Playbook deleted.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error deleting playbook: {e}")
         except Exception as e:
             st.error(f"Error reading memories: {e}")
 
