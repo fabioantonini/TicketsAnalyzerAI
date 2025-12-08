@@ -868,7 +868,6 @@ def render_phase_embeddings_vectordb_page(prefs):
     # Ensure directory exists
     try:
         os.makedirs(persist_dir, exist_ok=True)
-        st.caption(f"Current Chroma path: {persist_dir}")
     except Exception as e:
         st.error(f"Failed to create directory '{persist_dir}': {e}")
         return
@@ -2489,8 +2488,7 @@ def run_streamlit_app():
         current_phase = st.radio(
             "Current phase",
             options=PHASES,
-            key="ui_phase_choice",
-            help="This is only a visual wizard for now.",
+            key="ui_phase_choice"
         )
 
         if isinstance(current_phase, str):
