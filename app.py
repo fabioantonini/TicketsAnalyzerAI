@@ -1726,7 +1726,7 @@ def render_phase_chat_page(prefs):
     # -----------------------------
     # 4) UI
     # -----------------------------
-    st.title("Phase 5 – Chat & Results")
+    st.title("Phase 6 – Chat & Results")
     st.write(
         "Ask questions about your YouTrack tickets. The app retrieves similar tickets "
         "from the vector store, sends them to the LLM, and shows the answer together "
