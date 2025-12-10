@@ -367,8 +367,8 @@ PHASE_ICONS = {
     "Embeddings & Vector DB":   "🧩",
     "Retrieval configuration":  "🔍",
     "LLM & API keys":           "🔑",
-    "Solutions memory":         "💾",
     "Chat & Results":           "💬",
+    "Solutions memory":         "💾",
     "Preferences & debug":      "⚙️",
 }
 
@@ -1726,7 +1726,7 @@ def render_phase_chat_page(prefs):
     # -----------------------------
     # 4) UI
     # -----------------------------
-    st.title("Phase 6 – Chat & Results")
+    st.title("Phase 5 – Chat & Results")
     st.write(
         "Ask questions about your YouTrack tickets. The app retrieves similar tickets "
         "from the vector store, sends them to the LLM, and shows the answer together "
@@ -2127,7 +2127,7 @@ def render_phase_solutions_memory_page(prefs):
     if "show_memories" not in st.session_state:
         st.session_state["show_memories"] = bool(prefs_dict.get("show_memories", False))
 
-    st.title("Phase 5 – Solutions memory")
+    st.title("Phase 6 – Solutions memory")
     st.write(
         "Review and manage saved playbooks (memories) derived from solved tickets."
     )
@@ -2541,8 +2541,8 @@ def run_streamlit_app():
             "Embeddings & Vector DB",
             "Retrieval configuration",
             "LLM & API keys",
-            "Solutions memory",
             "Chat & Results",
+            "Solutions memory",
             "Preferences & debug",
         ]
 
