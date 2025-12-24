@@ -27,14 +27,6 @@ from typing import List, Tuple, Optional
 import re
 import shutil, subprocess
 
-# --- Extracted RAG core (keeps app.py behavior unchanged) ---
-try:
-    from rag_core import RetrievalConfig, retrieve_and_build_prompt  # type: ignore
-except Exception:
-    # Fallback: app.py will still work with the inline implementation if import fails.
-    RetrievalConfig = None  # type: ignore
-    retrieve_and_build_prompt = None  # type: ignore
-
 # NEW (optional): token encoder for precise chunking
 try:
     import tiktoken
@@ -524,7 +516,19 @@ class EmbeddingBackend:
         return self.model.encode(texts, normalize_embeddings=True).tolist()  # type: ignore
 
 def get_chroma_client(persist_dir: str):
-    """Create folder and return a Chroma PersistentClient."""
+    """Create folder and return a Chroma PersistentClient.
+
+    This function delegates to rag_core.get_chroma_client() when available,
+    while keeping a local fallback to preserve backward compatibility.
+    """
+    # Prefer shared core (used also by webhook/FastAPI service)
+    try:
+        from rag_core import get_chroma_client as _core_get_chroma_client  # type: ignore
+        return _core_get_chroma_client(persist_dir)
+    except Exception:
+        pass
+
+    # Fallback: legacy implementation (kept to avoid regressions)
     try:
         import chromadb  # lazy import (no global)
         from chromadb.config import Settings as ChromaSettings
@@ -551,10 +555,7 @@ class VectorStore:
         self.persist_dir = persist_dir
         self.collection_name = collection_name
         os.makedirs(self.persist_dir, exist_ok=True)
-        self.client = chromadb.PersistentClient(
-            path=persist_dir,
-            settings=ChromaSettings(anonymized_telemetry=False)  # type: ignore
-        )
+        self.client = get_chroma_client(persist_dir)
         self.col = self.client.get_or_create_collection(name=collection_name, metadata={"hnsw:space": "cosine"})
 
     def add(self, ids: List[str], documents: List[str], metadatas: List[dict], embeddings: List[List[float]]):
@@ -1834,145 +1835,116 @@ def render_phase_chat_page(prefs):
             # -----------------------------
             # 7) Retrieval
             # -----------------------------
+            q_emb = embedder.embed([query])
+
             top_k = int(st.session_state.get("top_k", 5))
             show_distances = bool(st.session_state.get("show_distances", False))
 
-            if retrieve_and_build_prompt is not None and RetrievalConfig is not None:
-                cfg = RetrievalConfig(
-                    top_k=top_k,
-                    max_distance=float(max_distance),
-                    enable_memory=bool(st.session_state.get("enable_memory", False)),
-                    mem_collection=MEM_COLLECTION,
-                    mem_cap=2,
-                    per_parent_display=int(st.session_state.get("per_parent_display", 1)),
-                    per_parent_prompt=int(st.session_state.get("per_parent_prompt", 3)),
-                    stitch_max_chars=int(st.session_state.get("stitch_max_chars", 1500)),
-                )
-                merged, merged_collapsed_view, merged_for_prompt, prompt, dbg = retrieve_and_build_prompt(
-                    query_text=query,
-                    embed_fn=embedder.embed,
-                    get_chroma_client=get_chroma_client,
-                    persist_dir=persist_dir,
-                    collection_name=collection_name,
-                    now_ts=now_ts,
-                    cfg=cfg,
+            # KB
+            _client = get_chroma_client(persist_dir)
+            kb_coll = _client.get_or_create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+
+            kb_res = kb_coll.query(
+                query_embeddings=q_emb,
+                n_results=top_k,
+            )
+            kb_docs = kb_res.get("documents", [[]])[0]
+            kb_metas = kb_res.get("metadatas", [[]])[0]
+            kb_dists = kb_res.get("distances", [[]])[0]
+
+            st.caption(
+                f"DEBUG KB: raw_n={len(kb_docs)}, "
+                f"count={kb_coll.count()}, "
+                f"dists[0:5]={kb_dists[:5]} (max_distance={max_distance})"
+            )
+
+            DIST_MAX_KB = max_distance
+            kb_retrieved = [
+                (doc, meta, dist, "KB")
+                for doc, meta, dist in zip(kb_docs, kb_metas, kb_dists)
+                if dist is not None and dist <= DIST_MAX_KB
+            ]
+
+            # MEMORIES
+            mem_retrieved = []
+            if st.session_state.get("enable_memory", False):
+                try:
+                    mem_client = get_chroma_client(persist_dir)
+                    mem_coll = mem_client.get_or_create_collection(
+                        name=MEM_COLLECTION,
+                        metadata={"hnsw:space": "cosine"},
+                    )
+
+                    mem_res = mem_coll.query(
+                        query_embeddings=q_emb,
+                        n_results=min(5, top_k),
+                    )
+                    mem_docs = mem_res.get("documents", [[]])[0]
+                    mem_metas = mem_res.get("metadatas", [[]])[0]
+                    mem_dists = mem_res.get("distances", [[]])[0]
+
+                    st.caption(
+                        f"DEBUG MEM: raw_n={len(mem_docs)}, "
+                        f"count={mem_coll.count()}, "
+                        f"dists[0:5]={mem_dists[:5]}"
+                    )
+
+                    DIST_MAX_MEM = DIST_MAX_KB
+                    now = now_ts()
+                    for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
+                        if dist is None:
+                            continue
+                        meta = meta or {}
+                        exp = int(meta.get("expires_at", 0))
+                        if exp and exp < now:
+                            continue
+                        if dist <= DIST_MAX_MEM:
+                            mem_retrieved.append((doc, meta, dist, "MEM"))
+                except Exception as e:
+                    st.caption(f"DEBUG MEM error: {e}")
+
+            # Merge MEM + KB
+            mem_cap = 2
+            merged = sorted(mem_retrieved, key=lambda x: x[2])[:mem_cap] + sorted(
+                kb_retrieved, key=lambda x: x[2]
+            )[: max(0, top_k - min(mem_cap, len(mem_retrieved)))]
+
+            # -----------------------------
+            # 8) Prompt build
+            # -----------------------------
+            if merged:
+                merged_collapsed_view = collapse_by_parent(
+                    merged,
+                    per_parent=int(st.session_state.get("per_parent_display", 1)),
+                    stitch_for_prompt=False,
                 )
 
-                st.caption(
-                    f"DEBUG KB: raw_n={dbg.get('kb_raw_n')}, "
-                    f"count={dbg.get('kb_count')}, "
-                    f"dists[0:5]={dbg.get('kb_dists_head')} (max_distance={max_distance})"
-                )
-                st.write(f"DEBUG: view={dbg.get('view_n')}, prompt_ctx={dbg.get('prompt_ctx_n')}")
-            else:
-                # Fallback: original inline code path (kept for safety)
-                q_emb = embedder.embed([query])
-
-                # KB
-                _client = get_chroma_client(persist_dir)
-                kb_coll = _client.get_or_create_collection(
-                    name=collection_name,
-                    metadata={"hnsw:space": "cosine"},
+                merged_for_prompt = collapse_by_parent(
+                    merged,
+                    per_parent=int(st.session_state.get("per_parent_prompt", 3)),
+                    stitch_for_prompt=True,
+                    max_chars=int(st.session_state.get("stitch_max_chars", 1500)),
                 )
 
-                kb_res = kb_coll.query(
-                    query_embeddings=q_emb,
-                    n_results=top_k,
-                )
-                kb_docs = kb_res.get("documents", [[]])[0]
-                kb_metas = kb_res.get("metadatas", [[]])[0]
-                kb_dists = kb_res.get("distances", [[]])[0]
-
-                st.caption(
-                    f"DEBUG KB: raw_n={len(kb_docs)}, "
-                    f"count={kb_coll.count()}, "
-                    f"dists[0:5]={kb_dists[:5]} (max_distance={max_distance})"
-                )
-
-                DIST_MAX_KB = max_distance
-                kb_retrieved = [
-                    (doc, meta, dist, "KB")
-                    for doc, meta, dist in zip(kb_docs, kb_metas, kb_dists)
-                    if dist is not None and dist <= DIST_MAX_KB
+                retrieved_for_prompt = [
+                    (doc, meta, dist) for (doc, meta, dist, _src) in merged_for_prompt
                 ]
-
-                # MEMORIES
-                mem_retrieved = []
-                if st.session_state.get("enable_memory", False):
-                    try:
-                        mem_client = get_chroma_client(persist_dir)
-                        mem_coll = mem_client.get_or_create_collection(
-                            name=MEM_COLLECTION,
-                            metadata={"hnsw:space": "cosine"},
-                        )
-
-                        mem_res = mem_coll.query(
-                            query_embeddings=q_emb,
-                            n_results=min(5, top_k),
-                        )
-                        mem_docs = mem_res.get("documents", [[]])[0]
-                        mem_metas = mem_res.get("metadatas", [[]])[0]
-                        mem_dists = mem_res.get("distances", [[]])[0]
-
-                        st.caption(
-                            f"DEBUG MEM: raw_n={len(mem_docs)}, "
-                            f"count={mem_coll.count()}, "
-                            f"dists[0:5]={mem_dists[:5]}"
-                        )
-
-                        DIST_MAX_MEM = DIST_MAX_KB
-                        now = now_ts()
-                        for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
-                            if dist is None:
-                                continue
-                            meta = meta or {}
-                            exp = int(meta.get("expires_at", 0))
-                            if exp and exp < now:
-                                continue
-                            if dist <= DIST_MAX_MEM:
-                                mem_retrieved.append((doc, meta, dist, "MEM"))
-                    except Exception as e:
-                        st.caption(f"DEBUG MEM error: {e}")
-
-                # Merge MEM + KB
-                mem_cap = 2
-                merged = sorted(mem_retrieved, key=lambda x: x[2])[:mem_cap] + sorted(
-                    kb_retrieved, key=lambda x: x[2]
-                )[: max(0, top_k - min(mem_cap, len(mem_retrieved)))]
-
-                # -----------------------------
-                # 8) Prompt build
-                # -----------------------------
-                if merged:
-                    merged_collapsed_view = collapse_by_parent(
-                        merged,
-                        per_parent=int(st.session_state.get("per_parent_display", 1)),
-                        stitch_for_prompt=False,
-                    )
-
-                    merged_for_prompt = collapse_by_parent(
-                        merged,
-                        per_parent=int(st.session_state.get("per_parent_prompt", 3)),
-                        stitch_for_prompt=True,
-                        max_chars=int(st.session_state.get("stitch_max_chars", 1500)),
-                    )
-
-                    retrieved_for_prompt = [
-                        (doc, meta, dist) for (doc, meta, dist, _src) in merged_for_prompt
-                    ]
-                    prompt = build_prompt(query, retrieved_for_prompt)
-                else:
-                    merged_collapsed_view = []
-                    merged_for_prompt = []
-                    prompt = (
-                        f"New ticket:\n{query.strip()}\n\n"
-                        "No similar ticket was found in the knowledge base."
-                    )
-
-                st.write(
-                    f"DEBUG: view={len(merged_collapsed_view)}, "
-                    f"prompt_ctx={len(merged_for_prompt)}"
+                prompt = build_prompt(query, retrieved_for_prompt)
+            else:
+                merged_collapsed_view = []
+                merged_for_prompt = []
+                prompt = (
+                    f"New ticket:\n{query.strip()}\n\n"
+                    "No similar ticket was found in the knowledge base."
                 )
+
+            st.write(
+                f"DEBUG: view={len(merged_collapsed_view)}, "
+                f"prompt_ctx={len(merged_for_prompt)}"
+            )
 
             if st.session_state.get("show_prompt", False):
                 with st.expander("Prompt sent to the LLM", expanded=False):

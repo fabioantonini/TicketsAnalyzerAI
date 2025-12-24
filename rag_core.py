@@ -1,27 +1,74 @@
 """rag_core.py
 
-Shared RAG logic extracted from app.py.
+Shared, UI-agnostic core utilities for:
+- Vector DB (Chroma) initialization
+- Retrieval post-processing (collapse, stitching)
+- Prompt building
 
-Design constraints
-- No Streamlit imports.
-- Keep behavior compatible with the previous inline implementation in app.py.
-- Make it easy to reuse from a webhook service (FastAPI) later.
-
-All code comments are in English.
+Keep this module free from Streamlit specifics so it can be reused by:
+- Streamlit UI (app.py)
+- FastAPI webhook service (YouTrack trigger)
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
+import os
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import List, Tuple, Optional, Dict, Any
+from collections import defaultdict
+
+# --- NumPy 2 compatibility shim (before importing chromadb) ---
+try:
+    import numpy as _np  # type: ignore
+    if not hasattr(_np, "float_"):  # NumPy 2.0+
+        _np.float_ = _np.float64     # type: ignore[attr-defined]
+    if not hasattr(_np, "int_"):
+        _np.int_ = _np.int64         # type: ignore[attr-defined]
+    if not hasattr(_np, "uint"):
+        _np.uint = _np.uint64        # type: ignore[attr-defined]
+except Exception:
+    pass
 
 
-RetrievedRow = Tuple[str, dict, float, str]
+@dataclass(frozen=True)
+class RetrievalConfig:
+    """Configuration for retrieval and post-processing."""
+    top_k: int = 5
+    max_distance: float = 0.35
+    collapse_duplicates: bool = True
+    per_parent_display: int = 1
+    per_parent_prompt: int = 3
+    stitch_max_chars: int = 1500
+
+
+def get_chroma_client(persist_dir: str):
+    """Return a Chroma PersistentClient (creating the folder if needed).
+
+    NOTE: This function intentionally avoids importing Streamlit.
+    Caller should handle UI-level error reporting.
+    """
+    import chromadb  # lazy import
+    from chromadb.config import Settings as ChromaSettings
+
+    os.makedirs(persist_dir, exist_ok=True)
+    return chromadb.PersistentClient(
+        path=persist_dir,
+        settings=ChromaSettings(anonymized_telemetry=False),
+    )
+
+
+def load_chroma_collection(persist_dir: str, collection_name: str, space: str = "cosine"):
+    """Open (or create) and return (client, collection)."""
+    client = get_chroma_client(persist_dir)
+    coll = client.get_or_create_collection(
+        name=collection_name,
+        metadata={"hnsw:space": space},
+    )
+    return client, coll
 
 
 def build_prompt(user_ticket: str, retrieved: List[Tuple[str, dict, float]]) -> str:
-    """Build the exact same prompt shape used in app.py."""
+    """Create the LLM prompt given the new ticket and retrieved contexts."""
     parts = [
         "New ticket:\n" + (user_ticket or "").strip(),
         "\nSimilar tickets found (closest first):",
@@ -38,11 +85,11 @@ def build_prompt(user_ticket: str, retrieved: List[Tuple[str, dict, float]]) -> 
 
 
 def collapse_by_parent(
-    results: Sequence[RetrievedRow],
+    results: List[Tuple[str, dict, float, str]],
     per_parent: int = 1,
     stitch_for_prompt: bool = False,
     max_chars: int = 1200,
-) -> List[RetrievedRow]:
+) -> List[Tuple[str, dict, float, str]]:
     """Collapse multiple chunks from the same ticket into one row.
 
     results: list of (doc, meta, dist, src)
@@ -50,16 +97,15 @@ def collapse_by_parent(
     - stitch_for_prompt: if True, concatenate selected chunks in order of 'pos' (bounded by max_chars)
     Returns: list of (doc, meta, dist, src) sorted by distance.
     """
-
-    groups: Dict[str, List[RetrievedRow]] = defaultdict(list)
+    groups: Dict[str, List[Tuple[str, dict, float, str]]] = defaultdict(list)
     for doc, meta, dist, src in results:
         meta = meta or {}
-        pid = meta.get("parent_id") or meta.get("id_readable") or ""
+        pid = meta.get("parent_id") or meta.get("id_readable") or "unknown"
         groups[str(pid)].append((doc, meta, dist, src))
 
-    collapsed: List[RetrievedRow] = []
+    collapsed: List[Tuple[str, dict, float, str]] = []
     for _pid, items in groups.items():
-        items = sorted(items, key=lambda x: (x[2], x[1].get("pos", 0)))  # distance, then pos
+        items = sorted(items, key=lambda x: (x[2], x[1].get("pos", 0)))  # dist, then pos
         keep = items[: max(1, int(per_parent))]
 
         if stitch_for_prompt and len(keep) > 1:
@@ -72,7 +118,7 @@ def collapse_by_parent(
                     break
                 buf.append(d)
                 total += len(d) + 2
-            best = keep[0]  # best distance
+            best = keep[0]
             stitched = "\n\n".join(buf) if buf else (best[0] or "")
             collapsed.append((stitched, best[1], best[2], best[3]))
         else:
@@ -81,93 +127,58 @@ def collapse_by_parent(
     return sorted(collapsed, key=lambda x: x[2])
 
 
-@dataclass
-class RetrievalConfig:
-    top_k: int = 5
-    max_distance: float = 0.35
-    enable_memory: bool = False
-    mem_collection: str = "__memories__"
-    mem_cap: int = 2
-    per_parent_display: int = 1
-    per_parent_prompt: int = 3
-    stitch_max_chars: int = 1500
-
-
 def retrieve_and_build_prompt(
     *,
-    query_text: str,
-    embed_fn: Callable[[List[str]], List[List[float]]],
-    get_chroma_client: Callable[[str], object],
-    persist_dir: str,
-    collection_name: str,
-    now_ts: Optional[Callable[[], int]] = None,
-    cfg: Optional[RetrievalConfig] = None,
-) -> Tuple[List[RetrievedRow], List[RetrievedRow], List[RetrievedRow], str, Dict[str, object]]:
-    """Retrieve similar docs (KB + optional memories) and build the LLM prompt.
+    query: str,
+    query_embedding: List[float],
+    kb_collection,
+    mem_collection=None,
+    cfg: RetrievalConfig = RetrievalConfig(),
+    now_ts: Optional[int] = None,
+    mem_cap: int = 2,
+) -> Tuple[str, List[Tuple[str, dict, float, str]], List[Tuple[str, dict, float, str]]]:
+    """Run retrieval on KB (+ optional memory collection) and build the LLM prompt.
 
     Returns:
-      merged: raw merged list of rows (doc, meta, dist, src)
-      merged_collapsed_view: collapsed list for UI display
-      merged_for_prompt: collapsed/stitched list for prompt context
-      prompt: final prompt string
-      debug: small dict with useful counters
+    - prompt (str)
+    - merged_collapsed_view (for UI display)
+    - merged_for_prompt (actually used as context)
     """
+    q_emb = [query_embedding]
 
-    cfg = cfg or RetrievalConfig()
-    q_emb = embed_fn([query_text])
+    kb_res = kb_collection.query(query_embeddings=q_emb, n_results=int(cfg.top_k))
+    kb_docs = kb_res.get("documents", [[]])[0]
+    kb_metas = kb_res.get("metadatas", [[]])[0]
+    kb_dists = kb_res.get("distances", [[]])[0]
 
-    # --- KB retrieval ---
-    client = get_chroma_client(persist_dir)
-    kb_coll = client.get_or_create_collection(
-        name=collection_name,
-        metadata={"hnsw:space": "cosine"},
-    )
-    kb_res = kb_coll.query(query_embeddings=q_emb, n_results=int(cfg.top_k))
-    kb_docs = (kb_res.get("documents") or [[]])[0]
-    kb_metas = (kb_res.get("metadatas") or [[]])[0]
-    kb_dists = (kb_res.get("distances") or [[]])[0]
-
-    kb_retrieved: List[RetrievedRow] = []
-    for doc, meta, dist in zip(kb_docs, kb_metas, kb_dists):
-        if dist is None:
-            continue
-        if float(dist) <= float(cfg.max_distance):
-            kb_retrieved.append((doc, meta or {}, float(dist), "KB"))
-
-    # --- Memories retrieval (optional) ---
-    mem_retrieved: List[RetrievedRow] = []
-    if bool(cfg.enable_memory):
-        try:
-            mem_client = get_chroma_client(persist_dir)
-            mem_coll = mem_client.get_or_create_collection(
-                name=cfg.mem_collection,
-                metadata={"hnsw:space": "cosine"},
-            )
-
-            mem_res = mem_coll.query(query_embeddings=q_emb, n_results=min(5, int(cfg.top_k)))
-            mem_docs = (mem_res.get("documents") or [[]])[0]
-            mem_metas = (mem_res.get("metadatas") or [[]])[0]
-            mem_dists = (mem_res.get("distances") or [[]])[0]
-
-            now = now_ts() if now_ts else 0
-            for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
-                if dist is None:
-                    continue
-                meta = meta or {}
-                exp = int(meta.get("expires_at", 0) or 0)
-                if now and exp and exp < now:
-                    continue
-                if float(dist) <= float(cfg.max_distance):
-                    mem_retrieved.append((doc, meta, float(dist), "MEM"))
-        except Exception:
-            # Keep identical spirit: memory retrieval errors must not break the flow.
-            mem_retrieved = []
-
-    # Merge MEM + KB (same strategy used in app.py)
-    mem_cap = int(cfg.mem_cap)
-    merged = sorted(mem_retrieved, key=lambda x: x[2])[:mem_cap] + sorted(kb_retrieved, key=lambda x: x[2])[
-        : max(0, int(cfg.top_k) - min(mem_cap, len(mem_retrieved)))
+    kb_retrieved = [
+        (doc, meta, dist, "KB")
+        for doc, meta, dist in zip(kb_docs, kb_metas, kb_dists)
+        if dist is not None and float(dist) <= float(cfg.max_distance)
     ]
+
+    mem_retrieved: List[Tuple[str, dict, float, str]] = []
+    if mem_collection is not None:
+        mem_res = mem_collection.query(query_embeddings=q_emb, n_results=min(5, int(cfg.top_k)))
+        mem_docs = mem_res.get("documents", [[]])[0]
+        mem_metas = mem_res.get("metadatas", [[]])[0]
+        mem_dists = mem_res.get("distances", [[]])[0]
+
+        for doc, meta, dist in zip(mem_docs, mem_metas, mem_dists):
+            if dist is None:
+                continue
+            meta = meta or {}
+            # TTL filter is optional
+            if now_ts is not None:
+                exp = int(meta.get("expires_at", 0) or 0)
+                if exp and exp < int(now_ts):
+                    continue
+            if float(dist) <= float(cfg.max_distance):
+                mem_retrieved.append((doc, meta, float(dist), "MEM"))
+
+    merged = sorted(mem_retrieved, key=lambda x: x[2])[: int(mem_cap)] + sorted(
+        kb_retrieved, key=lambda x: x[2]
+    )[: max(0, int(cfg.top_k) - min(int(mem_cap), len(mem_retrieved)))]
 
     if merged:
         merged_collapsed_view = collapse_by_parent(
@@ -182,28 +193,13 @@ def retrieve_and_build_prompt(
             max_chars=int(cfg.stitch_max_chars),
         )
         retrieved_for_prompt = [(doc, meta, dist) for (doc, meta, dist, _src) in merged_for_prompt]
-        prompt = build_prompt(query_text, retrieved_for_prompt)
+        prompt = build_prompt(query, retrieved_for_prompt)
     else:
         merged_collapsed_view = []
         merged_for_prompt = []
         prompt = (
-            f"New ticket:\n{(query_text or '').strip()}\n\n" "No similar ticket was found in the knowledge base."
+            f"New ticket:\n{(query or '').strip()}\n\n"
+            "No similar ticket was found in the knowledge base."
         )
 
-    try:
-        kb_count = kb_coll.count()  # type: ignore[attr-defined]
-    except Exception:
-        kb_count = "N/A"
-
-    debug: Dict[str, object] = {
-        "kb_raw_n": len(kb_docs),
-        "kb_count": kb_count,
-        "kb_used_n": len(kb_retrieved),
-        "mem_used_n": len(mem_retrieved),
-        "merged_n": len(merged),
-        "view_n": len(merged_collapsed_view),
-        "prompt_ctx_n": len(merged_for_prompt),
-        "kb_dists_head": kb_dists[:5] if isinstance(kb_dists, list) else kb_dists,
-    }
-
-    return merged, merged_collapsed_view, merged_for_prompt, prompt, debug
+    return prompt, merged_collapsed_view, merged_for_prompt
