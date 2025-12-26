@@ -15,3 +15,8 @@ sentence-transformers>=2.7.0
 
 # Ollama client CLI (opzionale; non installabile su Streamlit Cloud)
 ollama>=0.1.0
+
+# FastAPI per API
+fastapi
+uvicorn  
+pydantic
