@@ -58,7 +58,22 @@ def get_chroma_client(persist_dir: str):
 
 
 def load_chroma_collection(persist_dir: str, collection_name: str, space: str = "cosine"):
-    """Open (or create) and return (client, collection)."""
+    """Open (or create) and return the Chroma collection.
+
+    Note: the Streamlit app expects a *collection* object (with .add/.query).
+    If you need the client as well, call get_chroma_client() separately.
+    """
+    client = get_chroma_client(persist_dir)
+    return client.get_or_create_collection(
+        name=collection_name,
+        metadata={"hnsw:space": space},
+    )
+
+
+def load_chroma_client_and_collection(
+    persist_dir: str, collection_name: str, space: str = "cosine"
+):
+    """Convenience helper returning (client, collection)."""
     client = get_chroma_client(persist_dir)
     coll = client.get_or_create_collection(
         name=collection_name,

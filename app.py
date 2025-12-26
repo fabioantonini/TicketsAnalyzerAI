@@ -545,6 +545,25 @@ def get_chroma_client(persist_dir: str):
     )
 
 
+def load_chroma_collection(persist_dir: str, collection_name: str, space: str = "cosine"):
+    """Return a Chroma collection, creating it if needed.
+
+    Delegates to rag_core.load_chroma_collection() when available,
+    otherwise falls back to local get_chroma_client().
+    """
+    try:
+        from rag_core import load_chroma_collection as _core_load  # type: ignore
+        res = _core_load(persist_dir=persist_dir, collection_name=collection_name, space=space)
+        # Backward/forward compatibility: accept either a collection or (client, collection)
+        if isinstance(res, tuple) and len(res) == 2:
+            return res[1]
+        return res
+    except Exception:
+        pass
+    client = get_chroma_client(persist_dir)
+    return client.get_or_create_collection(name=collection_name, metadata={"hnsw:space": space})
+
+
 # ------------------------------
 # VectorStore (Chroma wrapper)
 # ------------------------------
@@ -556,7 +575,7 @@ class VectorStore:
         self.collection_name = collection_name
         os.makedirs(self.persist_dir, exist_ok=True)
         self.client = get_chroma_client(persist_dir)
-        self.col = self.client.get_or_create_collection(name=collection_name, metadata={"hnsw:space": "cosine"})
+        self.col = load_chroma_collection(self.persist_dir, collection_name, space="cosine")
 
     def add(self, ids: List[str], documents: List[str], metadatas: List[dict], embeddings: List[List[float]]):
         print(f"[DEBUG] add {len(ids)} documents to {self.collection_name}")
@@ -1841,12 +1860,7 @@ def render_phase_chat_page(prefs):
             show_distances = bool(st.session_state.get("show_distances", False))
 
             # KB
-            _client = get_chroma_client(persist_dir)
-            kb_coll = _client.get_or_create_collection(
-                name=collection_name,
-                metadata={"hnsw:space": "cosine"},
-            )
-
+            kb_coll = load_chroma_collection(persist_dir, collection_name, space="cosine")
             kb_res = kb_coll.query(
                 query_embeddings=q_emb,
                 n_results=top_k,
@@ -1872,12 +1886,7 @@ def render_phase_chat_page(prefs):
             mem_retrieved = []
             if st.session_state.get("enable_memory", False):
                 try:
-                    mem_client = get_chroma_client(persist_dir)
-                    mem_coll = mem_client.get_or_create_collection(
-                        name=MEM_COLLECTION,
-                        metadata={"hnsw:space": "cosine"},
-                    )
-
+                    mem_coll = load_chroma_collection(persist_dir, MEM_COLLECTION, space="cosine")
                     mem_res = mem_coll.query(
                         query_embeddings=q_emb,
                         n_results=min(5, top_k),
@@ -2078,10 +2087,7 @@ def render_phase_chat_page(prefs):
 
                 mem_emb = st.session_state["embedder"].embed([playbook_text])[0]
 
-                _client = get_chroma_client(persist_dir)
-                mem_coll = _client.get_or_create_collection(
-                    name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"}
-                )
+                mem_coll = load_chroma_collection(persist_dir, MEM_COLLECTION, space="cosine")
                 mem_id = f"mem::{uuid.uuid4().hex[:12]}"
                 mem_coll.add(
                     ids=[mem_id],
@@ -2186,10 +2192,7 @@ def render_phase_solutions_memory_page(prefs):
             try:
                 _client = get_chroma_client(persist_dir)
                 _client.delete_collection(name=MEM_COLLECTION)
-                _client.get_or_create_collection(
-                    name=MEM_COLLECTION,
-                    metadata={"hnsw:space": "cosine"},
-                )
+                load_chroma_collection(persist_dir, MEM_COLLECTION, space="cosine")
                 st.success("Memories deleted.")
             except Exception as e:
                 st.error(f"Error deleting memories: {e}")
@@ -2201,9 +2204,7 @@ def render_phase_solutions_memory_page(prefs):
         st.subheader("Saved playbooks (memories)")
         try:
             client = get_chroma_client(persist_dir)
-            mem_coll = client.get_or_create_collection(
-                name=MEM_COLLECTION, metadata={"hnsw:space": "cosine"}
-            )
+            mem_coll = load_chroma_collection(persist_dir, MEM_COLLECTION, space="cosine")
             count = mem_coll.count()
             st.caption(f"Collection: '{MEM_COLLECTION}' — path: {persist_dir} — count: {count}")
 
