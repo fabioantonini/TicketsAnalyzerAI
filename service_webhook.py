@@ -22,8 +22,8 @@ from rag_core import (
 # ----------------------------
 # Configuration (env vars)
 # ----------------------------
-CHROMA_DIR = os.getenv("CHROMA_DIR", os.getenv("PERSIST_DIR", "./data/chroma"))
-KB_COLLECTION = os.getenv("KB_COLLECTION", "tickets")
+CHROMA_DIR_ENV = os.getenv("CHROMA_DIR", os.getenv("PERSIST_DIR", "")).strip()
+APP_PREFS_PATH = os.getenv("APP_PREFS_PATH", ".app_prefs.json").strip()
 MEM_COLLECTION = os.getenv("MEM_COLLECTION", "memories")  # optional
 ENABLE_MEMORY = os.getenv("ENABLE_MEMORY", "0").strip() == "1"
 
@@ -95,6 +95,53 @@ def _yt_headers() -> Dict[str, str]:
         raise RuntimeError("YT_BASE_URL and/or YT_TOKEN not configured")
     return {"Authorization": f"Bearer {YT_TOKEN}", "Content-Type": "application/json"}
 
+def _load_app_prefs(prefs_path: str) -> Dict[str, Any]:
+    if not prefs_path:
+        return {}
+    try:
+        if os.path.isfile(prefs_path):
+            with open(prefs_path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+    except Exception:
+        return {}
+    return {}
+
+def _resolve_chroma_dir() -> str:
+    if CHROMA_DIR_ENV:
+        return CHROMA_DIR_ENV
+    prefs = _load_app_prefs(APP_PREFS_PATH)
+    persist_dir = (prefs.get("persist_dir") or "").strip()
+    if persist_dir:
+        return persist_dir
+    return "./data/chroma"
+
+def _parse_project_short_name_from_readable(id_readable: str) -> Optional[str]:
+    s = (id_readable or "").strip()
+    if "-" not in s:
+        return None
+    left = s.split("-", 1)[0].strip()
+    if not left:
+        return None
+    return left
+
+def _resolve_kb_collection_name(
+    payload_kb_collection: Optional[str],
+    issue_id: str,
+    id_readable: str,
+    issue_obj: Optional[Dict[str, Any]],
+) -> str:
+    if payload_kb_collection and payload_kb_collection.strip():
+        return payload_kb_collection.strip().lower()
+    if issue_obj:
+        proj = issue_obj.get("project") or {}
+        short = (proj.get("shortName") or "").strip()
+        if short:
+            return short.lower()
+    short = _parse_project_short_name_from_readable(id_readable) \
+        or _parse_project_short_name_from_readable(issue_id)
+    if short:
+        return short.lower()
+    return "tickets"
 
 def yt_get_issue(issue_id: str) -> Dict[str, Any]:
     """Fetch issue details from YouTrack by internal issue id."""
@@ -199,6 +246,7 @@ def issue_created(
     id_readable = (payload.id_readable or "").strip()
     summary = (payload.summary or "").strip()
     description = (payload.description or "").strip()
+    issue_obj = None
 
     if not (summary or description):
         # Fetch from YouTrack if not provided
@@ -213,8 +261,10 @@ def issue_created(
     query_text = (summary + "\n\n" + description).strip()
 
     # 3) Load KB (and optional MEM) collections via rag_core
-    kb_name = (payload.kb_collection or KB_COLLECTION).strip() or KB_COLLECTION
-    kb_coll = load_chroma_collection(CHROMA_DIR, kb_name, space="cosine")
+    chroma_dir = _resolve_chroma_dir()
+    kb_name = _resolve_kb_collection_name(
+        payload.kb_collection, issue_id, id_readable, issue_obj)
+    kb_coll = load_chroma_collection(chroma_dir, kb_name, space="cosine")
 
     mem_coll = None
     if ENABLE_MEMORY:
@@ -224,7 +274,7 @@ def issue_created(
             mem_coll = None  # do not fail the webhook if MEM is not available
 
     # 4) Ensure embeddings match the collection used for indexing
-    provider, model = _read_collection_meta(CHROMA_DIR, kb_name)
+    provider, model = _read_collection_meta(chroma_dir, kb_name)
     provider = provider or "openai"
     model = model or "text-embedding-3-small"
 
