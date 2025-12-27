@@ -104,6 +104,15 @@ def yt_get_issue(issue_id: str) -> Dict[str, Any]:
     r.raise_for_status()
     return r.json()
 
+def yt_has_rag_comment(issue_id: str) -> bool:
+    url = f"{YT_BASE_URL}/api/issues/{issue_id}/comments"
+    params = {"fields": "text"}
+    r = requests.get(url, headers=_yt_headers(), params=params, timeout=30)
+    r.raise_for_status()
+    for c in r.json():
+        if "<!--RAG_SIMILAR_v1-->" in (c.get("text") or ""):
+            return True
+    return False
 
 def yt_add_comment(issue_id: str, text: str) -> None:
     """Add comment to issue."""
@@ -148,6 +157,8 @@ def _format_similar_comment(
 
     lines.append("")
     lines.append("_Generated automatically on issue creation._")
+    lines.append("")
+    lines.append("<!--RAG_SIMILAR_v1-->")
     return "\n".join(lines)
 
 
@@ -243,6 +254,14 @@ def issue_created(
         mem_cap=MEM_CAP,
     )
 
+    # Remove self-reference (same issue)
+    self_ids = {issue_id, id_readable}
+    merged_view = [
+        (doc, meta, dist, src)
+        for (doc, meta, dist, src) in merged_view
+        if (meta or {}).get("id_readable") not in self_ids
+    ]
+
     # 6) Write-back: comment into YouTrack
     try:
         comment_text = _format_similar_comment(
@@ -250,6 +269,12 @@ def issue_created(
             merged_collapsed_view=merged_view,
             yt_base_url=YT_BASE_URL,
         )
+        if yt_has_rag_comment(issue_id):
+            return {
+                "status": "skipped",
+                "reason": "rag_comment_already_present",
+                "issue_id": issue_id,
+            }
         yt_add_comment(issue_id, comment_text)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to add comment in YouTrack: {e}")
