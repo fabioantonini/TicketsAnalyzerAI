@@ -14,3 +14,8 @@ tiktoken>=0.7.0
 
 # NOTA: su Streamlit Cloud non installare modelli locali
 # sentence-transformers e ollama sono volutamente esclusi
+
+# FastAPI per API
+fastapi
+uvicorn  
+pydantic
