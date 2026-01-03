@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional
 import re
 import shutil, subprocess
+from pathlib import Path
 
 # NEW (optional): token encoder for precise chunking
 try:
@@ -34,8 +35,6 @@ try:
 except Exception:
     _tk_enc = None
 
-# === Sticky prefs (Level A) ===
-import os
 
 # --- NumPy 2 compatibility shim (before importing chromadb) ---
 try:
@@ -78,6 +77,7 @@ def pick_default_chroma_dir() -> str:
     # also support st.secrets["CHROMA_DIR"]
     try:
         import streamlit as st  # type: ignore
+        import gc
         sec_dir = st.secrets.get("CHROMA_DIR") if hasattr(st, "secrets") else None
         if sec_dir:
             return str(sec_dir)
@@ -98,6 +98,434 @@ DEFAULT_CHROMA_DIR = pick_default_chroma_dir()
 # Preferences path: write to /tmp in cloud
 PREFS_PATH = os.path.join("/tmp", ".app_prefs.json") if IS_CLOUD else os.path.join(APP_DIR, ".app_prefs.json")
 
+# === MULTI-PROJECT SUPPORT (auto-inserted) ===
+# Registry file storing the list of projects and the active one.
+PROJECTS_REGISTRY_PATH = os.path.join("/tmp", ".taai_projects.json") if IS_CLOUD else os.path.join(APP_DIR, ".taai_projects.json")
+PROJECTS_ROOT_DIR = os.path.join("/tmp", "projects") if IS_CLOUD else os.path.join(APP_DIR, "projects")
+
+# Old single-project prefs location (used for one-time migration).
+OLD_PREFS_PATH = os.path.join("/tmp", ".app_prefs.json") if IS_CLOUD else os.path.join(APP_DIR, ".app_prefs.json")
+
+def _normalize_project_key(k: str) -> str:
+    return (k or "").strip().lower().replace(" ", "_")
+
+def _load_json_file(path: str) -> dict:
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+    except Exception:
+        pass
+    return {}
+
+def _save_json_file(path: str, data: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def _ensure_registry() -> dict:
+    reg = _load_json_file(PROJECTS_REGISTRY_PATH)
+    reg.setdefault("active_project", "default")
+    reg.setdefault("projects", {})
+    if "default" not in reg["projects"]:
+        reg["projects"]["default"] = {"name": "Default", "prefs_path": os.path.join("projects", "default", "app_prefs.json")}
+    # One-time migration: if old prefs exist and default project prefs do not, copy them.
+    default_prefs_abs = os.path.join(APP_DIR, reg["projects"]["default"]["prefs_path"])
+    if os.path.exists(OLD_PREFS_PATH) and not os.path.exists(default_prefs_abs):
+        os.makedirs(os.path.dirname(default_prefs_abs), exist_ok=True)
+        try:
+            shutil.copy2(OLD_PREFS_PATH, default_prefs_abs)
+        except Exception:
+            pass
+    _save_json_file(PROJECTS_REGISTRY_PATH, reg)
+    return reg
+
+def _load_registry() -> dict:
+    return _ensure_registry()
+
+def _save_registry(reg: dict) -> None:
+    _save_json_file(PROJECTS_REGISTRY_PATH, reg)
+
+def _get_active_project_key() -> str:
+    reg = _load_registry()
+    return _normalize_project_key(reg.get("active_project") or "default")
+
+def _set_active_project_key(project_key: str) -> None:
+    reg = _load_registry()
+    k = _normalize_project_key(project_key)
+    if k not in reg.get("projects", {}):
+        reg["projects"][k] = {"name": k.upper(), "prefs_path": os.path.join("projects", k, "app_prefs.json")}
+    reg["active_project"] = k
+    _save_registry(reg)
+
+def _get_project_prefs_path(project_key: str) -> str:
+    reg = _load_registry()
+    k = _normalize_project_key(project_key)
+    info = (reg.get("projects") or {}).get(k) or {}
+    rel = (info.get("prefs_path") or os.path.join("projects", k, "app_prefs.json")).strip()
+    if not os.path.isabs(rel):
+    # Map "projects/<k>/app_prefs.json" under PROJECTS_ROOT_DIR
+        rel = rel.replace("\\", "/")
+        if rel.startswith("projects/"):
+            rel = rel[len("projects/"):]
+        return os.path.join(PROJECTS_ROOT_DIR, rel)
+    return rel
+
+def _get_active_prefs_path() -> str:
+    return _get_project_prefs_path(_get_active_project_key())
+
+def _resolve_persist_dir(persist_dir: str) -> str:
+    """Resolve persist_dir (which can be relative) to an absolute path."""
+    if not persist_dir:
+        return ""
+    # Relative paths are interpreted relative to APP_DIR (repo folder)
+    if not os.path.isabs(persist_dir):
+        return os.path.abspath(os.path.join(APP_DIR, persist_dir))
+    return persist_dir
+
+def _safe_rmtree(path: str) -> bool:
+    """Remove a directory tree. Return True if removed, False otherwise."""
+    try:
+        if path and os.path.isdir(path):
+            shutil.rmtree(path)
+            return True
+    except Exception:
+        return False
+    return False
+
+def _get_project_dir(project_key: str) -> str:
+    return os.path.dirname(_get_project_prefs_path(project_key))
+
+def _default_project_persist_dir(project_key: str) -> str:
+    return os.path.join(_get_project_dir(project_key), "chroma")
+
+def delete_project(project_key: str, *, delete_project_folder: bool = True, delete_vector_db: bool = False) -> str:
+    """Delete a project from registry and remove its prefs file and (optionally) its vector DB."""
+    project_key = _normalize_project_key(project_key)
+    if project_key == "default":
+        raise ValueError("Cannot delete 'default' project")
+
+    reg = _load_registry()
+    projects = reg.get("projects", {}) or {}
+    if project_key not in projects:
+        return "Project not found (already deleted)."
+
+    prefs_abs = _get_project_prefs_path(project_key)
+
+    # Load prefs to find persist_dir (for optional vector DB deletion)
+    persist_dir_abs = ""
+    try:
+        if os.path.exists(prefs_abs):
+            prefs = _load_json_file(prefs_abs)
+            persist_dir_abs = _resolve_persist_dir(prefs.get("persist_dir", ""), base_dir=_get_project_dir(project_key))
+    except Exception:
+        persist_dir_abs = ""
+
+    # Remove from registry
+    projects.pop(project_key, None)
+    reg["projects"] = projects
+
+    # If active was deleted, fallback
+    active = _normalize_project_key(reg.get("active_project", "default"))
+    if active == project_key:
+        fallback = "default" if "default" in projects else (sorted(projects.keys())[0] if projects else "default")
+        reg["active_project"] = fallback
+        try:
+            st.session_state["active_project"] = fallback
+        except Exception:
+            pass
+
+    _save_registry(reg)
+
+    # Best-effort release any open Chroma handles before deleting folders (Windows locks sqlite)
+    if persist_dir_abs:
+        _release_vector_db_if_open(persist_dir_abs)
+
+    errors: list[str] = []
+
+    # Delete prefs file
+    try:
+        from pathlib import Path
+        p = Path(prefs_abs)
+        if p.exists():
+            p.unlink()
+    except Exception as e:
+        errors.append(f"prefs unlink failed: {e}")
+
+    # Delete project folder (force delete)
+    if delete_project_folder:
+        try:
+            folder = os.path.dirname(prefs_abs)
+            if os.path.isdir(folder):
+                shutil.rmtree(folder)
+        except Exception as e:
+            errors.append(f"project folder delete failed (likely file lock): {e}")
+
+    # Delete vector DB (optional, with safety checks)
+    removed_vdb = False
+    if delete_vector_db and persist_dir_abs:
+        app_dir_abs = os.path.abspath(APP_DIR)
+        proj_dir_abs = os.path.abspath(os.path.join(PROJECTS_ROOT_DIR, project_key))
+        persist_norm = os.path.abspath(persist_dir_abs)
+
+        try:
+            is_inside_app = os.path.commonpath([app_dir_abs, persist_norm]) == app_dir_abs
+            is_inside_proj = os.path.commonpath([proj_dir_abs, persist_norm]) == proj_dir_abs
+        except Exception:
+            is_inside_app = False
+            is_inside_proj = False
+
+        if is_inside_app or is_inside_proj:
+            try:
+                if os.path.isdir(persist_norm):
+                    shutil.rmtree(persist_norm)
+                    removed_vdb = True
+            except Exception:
+                removed_vdb = False
+
+    msg = f"Deleted project '{project_key}'."
+    if delete_vector_db:
+        msg += " Vector DB removed." if removed_vdb else " Vector DB NOT removed (path unsafe or missing)."
+    if errors:
+        msg += " WARN: " + " | ".join(errors)
+    return msg
+
+
+
+def _default_active_persist_dir() -> str:
+    """Per-project default persist_dir for the currently active project."""
+    try:
+        k = _get_active_project_key()
+    except Exception:
+        k = "default"
+    return _default_project_persist_dir(k)
+
+
+def _release_vector_db_if_open(persist_dir_abs: str) -> None:
+    """
+    Best-effort: release file handles on Windows by dropping references
+    to Chroma objects kept in session_state.
+    """
+    try:
+        if "vs_persist_dir" in st.session_state and os.path.abspath(st.session_state.get("vs_persist_dir") or "") == os.path.abspath(persist_dir_abs):
+            st.session_state["vector"] = None
+            st.session_state["embedder"] = None
+            st.session_state["vs_count"] = 0
+            st.session_state["vs_collection"] = None
+            st.session_state["vs_persist_dir"] = None
+    except Exception:
+        pass
+    try:
+        import gc as _gc
+        import time as _time
+        _gc.collect()
+        _time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def init_projects_in_session() -> None:
+    if "active_project" not in st.session_state:
+        st.session_state["active_project"] = _get_active_project_key()
+    else:
+        _set_active_project_key(st.session_state["active_project"])
+
+def render_project_selector() -> None:
+    reg = _load_registry()
+    projects = reg.get("projects", {}) or {}
+    keys = sorted(projects.keys())
+    if not keys:
+        keys = ["default"]
+        projects["default"] = {"name": "Default", "prefs_path": os.path.join("projects", "default", "app_prefs.json")}
+        reg["projects"] = projects
+        reg["active_project"] = "default"
+        _save_registry(reg)
+
+    # Sidebar UI
+    st.sidebar.markdown("### Project")
+    
+    # === PROJECT ACTIONS (auto-patched) ===
+    # Project actions: store secrets toggle + save button.
+    # Persist the toggle inside project prefs by saving it with other prefs.
+    active = st.session_state.get("active_project") or reg.get("active_project") or "default"
+    active = _normalize_project_key(active)
+    if active not in keys:
+        active = keys[0]
+
+    if "store_secrets_in_project" not in st.session_state:
+        # Default: do not store secrets unless user enables it explicitly
+        st.session_state["store_secrets_in_project"] = False
+
+    st.sidebar.checkbox(
+        "Store secrets in project file",
+        key="store_secrets_in_project",
+        help="If enabled, yt_token/openai_api_key/webhook_secret are saved in the project's JSON file.",
+    )
+
+    st.sidebar.markdown("#### Actions")
+    a1, a2, a3, a4 = st.sidebar.columns(4)
+
+    with a1:
+        if st.button("Save", use_container_width=True):
+            save_active_project_prefs(show_success=True)
+
+    with a2:
+        with st.popover("Duplicate", use_container_width=True):
+            dup_key = st.text_input("New project key", placeholder="e.g. netkb_copy").strip()
+            dup_name = st.text_input("New project name (optional)", placeholder="e.g. NETKB COPY").strip()
+            if st.button("Create duplicate", type="primary"):
+                nk = _normalize_project_key(dup_key)
+                if not nk:
+                    st.error("Project key is required.")
+                elif nk in keys:
+                    st.error("Project key already exists.")
+                else:
+                    src = _get_active_prefs_path()
+                    dst = _get_project_prefs_path(nk)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+
+                    reg = _load_registry()
+                    reg.setdefault("projects", {})
+                    reg["projects"][nk] = {"name": dup_name or nk.upper(), "prefs_path": os.path.join("projects", nk, "app_prefs.json")}
+                    reg["active_project"] = nk
+                    _save_registry(reg)
+
+                    st.session_state["active_project"] = nk
+                    _set_active_project_key(nk)
+                    st.success(f"Duplicated into '{nk}'")
+                    st.rerun()
+
+    with a3:
+        with st.popover("Rename", use_container_width=True):
+            reg = _load_registry()
+            projects = reg.get("projects", {}) or {}
+            cur_name = (projects.get(active, {}) or {}).get("name", active.upper())
+            new_disp = st.text_input("Project display name", value=cur_name).strip()
+            if st.button("Save name", type="primary"):
+                projects.setdefault(active, {"prefs_path": os.path.join("projects", active, "app_prefs.json")})
+                projects[active]["name"] = new_disp or active.upper()
+                reg["projects"] = projects
+                _save_registry(reg)
+                st.success("Name updated.")
+                st.rerun()
+
+    with a4:
+        with st.popover("Delete", use_container_width=True):
+            if active == "default":
+                st.info("Default project cannot be deleted.")
+            else:
+                st.warning(f"Delete project '{active}'? This cannot be undone.")
+                confirm = st.text_input("Type the project key to confirm", value="")
+                delete_folder = st.checkbox("Also delete project folder", value=True)
+                delete_vdb = st.checkbox("Also delete Vector DB (persist_dir)", value=True)
+                if st.button("Confirm delete", type="primary"):
+                    if confirm.strip().lower() != active:
+                        st.error("Confirmation key does not match.")
+                    else:
+                        msg = delete_project(active, delete_project_folder=delete_folder, delete_vector_db=delete_vdb)
+                        st.write(f"Deleting project: {active}")
+                        st.write(f"Deleted folder: {delete_folder}")
+                        st.write(f"Deleted vector DB: {delete_vdb}")
+                        st.success(msg)
+                        # Clear cached prefs in session (avoid leaking settings)
+                        for k in list(st.session_state.keys()):
+                            if k.startswith("prefs_"):
+                                st.session_state.pop(k, None)
+                        st.rerun()
+
+    # === END PROJECT ACTIONS ===
+
+    sel = st.sidebar.selectbox("Active project", options=keys, index=keys.index(active))
+    if sel != active:
+        st.session_state["active_project"] = sel
+        _set_active_project_key(sel)
+        # Force re-init prefs on next run
+        for k in list(st.session_state.keys()):
+            if k.startswith("prefs_"):
+                st.session_state.pop(k, None)
+        st.rerun()
+
+    with st.sidebar.expander("Create new project", expanded=False):
+        new_key = st.text_input("Project key", value="", placeholder="e.g. netkb").strip()
+        new_name = st.text_input("Project name", value="", placeholder="e.g. NETKB").strip()
+        if st.button("Create project"):
+            nk = _normalize_project_key(new_key)
+            if nk in keys:
+                st.error("Project key already exists.")
+                st.stop()
+            if not nk:
+                st.warning("Project key is required")
+                st.stop()
+
+            # Capture current active prefs BEFORE switching project
+            old_prefs_abs = _get_active_prefs_path()
+
+            reg = _load_registry()
+            reg.setdefault("projects", {})
+            if nk not in reg["projects"]:
+                reg["projects"][nk] = {
+                    "name": new_name or nk.upper(),
+                    "prefs_path": os.path.join("projects", nk, "app_prefs.json"),
+                }
+                _save_registry(reg)
+
+            prefs_abs = _get_project_prefs_path(nk)
+            os.makedirs(os.path.dirname(prefs_abs), exist_ok=True)
+
+            # Create project prefs if missing
+            if not os.path.exists(prefs_abs):
+                created = False
+
+                # Option 1: copy current active prefs as starting point (includes yt_token/openai_api_key)
+                try:
+                    if os.path.exists(old_prefs_abs):
+                        shutil.copy2(old_prefs_abs, prefs_abs)
+                        created = True
+                except Exception:
+                    created = False
+
+                # Option 2: template + inherit from old prefs (including yt_token/openai_api_key)
+                if not created:
+                    template = {
+                        "yt_url": "",
+                        "yt_token": "",
+                        "webhook_secret": "supersecret",
+                        "openai_api_key": "",
+                        "persist_dir": "./data/chroma",
+                        "emb_backend": "OpenAI",
+                        "emb_model_name": "text-embedding-3-small",
+                        "max_distance": 0.9,
+                        "top_k": 4,
+                        "collapse_duplicates": True,
+                        "per_parent_display": 1,
+                        "per_parent_prompt": 3,
+                        "stitch_max_chars": 1600,
+                        "enable_memory": True,
+                        "mem_ttl_days": 180,
+                        "prefs_enabled": True
+                    }
+
+                    # Inherit from current project if available
+                    try:
+                        if os.path.exists(old_prefs_abs):
+                            old = _load_json_file(old_prefs_abs)
+                            for k in ("yt_url", "yt_token", "openai_api_key", "webhook_secret", "persist_dir",
+                                    "emb_backend", "emb_model_name"):
+                                if old.get(k):
+                                    template[k] = old[k]
+                    except Exception:
+                        pass
+
+                    _save_json_file(prefs_abs, template)
+
+            # Switch active project only after prefs file exists
+            st.session_state["active_project"] = nk
+            _set_active_project_key(nk)
+            st.success(f"Project '{nk}' created and selected")
+            st.rerun()
+
+# === END MULTI-PROJECT SUPPORT ===
 
 NON_SENSITIVE_PREF_KEYS = {
     "yt_url",
@@ -126,36 +554,87 @@ NON_SENSITIVE_PREF_KEYS = {
     "mem_show_full",
     "show_memories",
     "prefs_enabled",
+    "store_secrets_in_project",
     }
 
+
+
+# === PROJECT PREF KEYS (auto-patched) ===
+# Sensitive keys can be saved per-project if the user enables it via UI toggle.
+SENSITIVE_PREF_KEYS = {
+    "yt_token",
+    "openai_api_key",
+    "webhook_secret",
+}
+
+# Full set of keys allowed to be saved into the project's app_prefs.json.
+# NOTE: Actual saving of sensitive keys depends on 'store_secrets_in_project' flag.
+PREF_KEYS = set(NON_SENSITIVE_PREF_KEYS) | set(SENSITIVE_PREF_KEYS)
+# === END PROJECT PREF KEYS ===
 def load_prefs() -> dict:
     try:
-        if os.path.exists(PREFS_PATH):
-            with open(PREFS_PATH, "r", encoding="utf-8") as f:
+        if os.path.exists(_get_active_prefs_path()):
+            with open(_get_active_prefs_path(), "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return {k: v for k, v in data.items() if k in NON_SENSITIVE_PREF_KEYS}
+                return {k: v for k, v in data.items() if k in PREF_KEYS}
     except Exception:
         pass
     return {}
 
 def save_prefs(prefs: dict):
     try:
-        clean = {k: v for k, v in prefs.items() if k in NON_SENSITIVE_PREF_KEYS}
-        with open(PREFS_PATH, "w", encoding="utf-8") as f:
+        clean = {k: v for k, v in prefs.items() if k in PREF_KEYS}
+        with open(_get_active_prefs_path(), "w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[WARN] save_prefs: {e}")
 
+
+# === SAVE ACTIVE PROJECT PREFS (auto-patched) ===
+def save_active_project_prefs(show_success: bool = True) -> str:
+    """Save the current project's preferences to the active project prefs file.
+
+    Sensitive keys (yt_token/openai_api_key/webhook_secret) are saved only if
+    st.session_state['store_secrets_in_project'] is True.
+    """
+    prefs_path = _get_active_prefs_path()
+
+    store_secrets = bool(st.session_state.get("store_secrets_in_project", False))
+
+    # Collect prefs from session_state. Prefer plain keys; also accept prefs_<key>.
+    prefs: dict = {}
+    for k in PREF_KEYS:
+        if k in st.session_state:
+            prefs[k] = st.session_state.get(k)
+        elif f"prefs_{k}" in st.session_state:
+            prefs[k] = st.session_state.get(f"prefs_{k}")
+
+    if not store_secrets:
+        for k in SENSITIVE_PREF_KEYS:
+            prefs.pop(k, None)
+
+    # Persist to disk (project-scoped)
+    _save_json_file(prefs_path, prefs)
+
+    if show_success:
+        st.sidebar.success(f"Saved project to: {prefs_path}")
+
+    return prefs_path
+# === END SAVE ACTIVE PROJECT PREFS ===
+
 def init_prefs_in_session():
     prefs = load_prefs() or {}
+
+    active_key = _get_active_project_key()
+    proj_default = _default_project_persist_dir(active_key)
 
     # --- Fix persist_dir for cloud/local ---
     pd = (prefs.get("persist_dir") or "").strip()
     if not pd:
-        prefs["persist_dir"] = DEFAULT_CHROMA_DIR
+        prefs["persist_dir"] = proj_default
     else:
         if IS_CLOUD and not pd.startswith("/tmp/"):
-            prefs["persist_dir"] = DEFAULT_CHROMA_DIR
+            prefs["persist_dir"] = os.path.abspath(os.path.join(_get_project_dir(active_key), pd))
 
     # --- Initialize session_state for all prefs keys (once only) ---
     for key, value in prefs.items():
@@ -593,7 +1072,7 @@ class VectorStore:
 def get_openai_key() -> Optional[str]:
     try:
         import streamlit as st  # type: ignore
-        ui_key = st.session_state.get("openai_key")
+        ui_key = st.session_state.get("openai_api_key")
         if ui_key:
             return ui_key
         if hasattr(st, "secrets") and "OPENAI_API_KEY" in st.secrets:
@@ -894,7 +1373,7 @@ def render_phase_embeddings_vectordb_page(prefs):
             st.session_state[key] = default
 
     # Persist dir
-    init_state("persist_dir", prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR))
+    init_state("persist_dir", prefs_dict.get("persist_dir", _default_active_persist_dir()))
 
     # Collections (semantic: collection_selected + vs_collection = actual name)
     init_state(
@@ -1677,15 +2156,15 @@ def render_phase_llm_page(prefs):
 
     openai_needed = (emb_backend == "OpenAI") or (llm_provider == "OpenAI")
 
-    openai_key_input = st.text_input("OpenAI API Key",
+    openai_api_key_input = st.text_input("OpenAI API Key",
         type="password",
-        value=st.session_state.get("openai_key", ""),
+        value=st.session_state.get("openai_api_key", ""),
         disabled=not openai_needed,
         help="Used only if you choose OpenAI as provider for Embeddings or LLM."
     )
 
-    if openai_key_input:
-        st.session_state["openai_key"] = openai_key_input
+    if openai_api_key_input:
+        st.session_state["openai_api_key"] = openai_api_key_input
 
     if not openai_needed:
         st.caption("OpenAI API Key not needed: you are using only local providers (Ollama / sentence-transformers).")
@@ -1709,7 +2188,7 @@ def render_phase_chat_page(prefs):
     persist_dir = (
         st.session_state.get("vs_persist_dir")
         or st.session_state.get("persist_dir")
-        or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
+        or prefs_dict.get("persist_dir", _default_active_persist_dir())
     )
 
     collection_name = (
@@ -2126,7 +2605,7 @@ def render_phase_solutions_memory_page(prefs):
     persist_dir = (
         st.session_state.get("vs_persist_dir")
         or st.session_state.get("persist_dir")
-        or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
+        or prefs_dict.get("persist_dir", _default_active_persist_dir())
     )
 
     # 3) Bootstrap UNA SOLA VOLTA i valori in session_state dai prefs
@@ -2303,105 +2782,14 @@ def render_phase_preferences_debug_page(prefs):
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Save preferences"):
-            if prefs_enabled:
-                try:
-                    # --- Provider coercion: if Ollama not available, force OpenAI ---
-                    _provider_for_save = st.session_state.get("last_llm_provider") or \
-                        st.session_state.get("llm_provider_select") or prefs_dict.get("llm_provider", "OpenAI")
-
-                    # Local Ollama availability check (do not rely on UI-phase variable)
-                    if IS_CLOUD:
-                        _ollama_ok = False
-                    else:
-                        _ollama_ok, _ = is_ollama_available()
-                    if not _ollama_ok and _provider_for_save == "Ollama (local)":
-                        _provider_for_save = "OpenAI"
-
-                    # --- LLM model: never empty and consistent with provider ---
-                    _model_for_save = (st.session_state.get("llm_model") or "").strip()
-                    if not _model_for_save:
-                        _model_for_save = DEFAULT_LLM_MODEL if _provider_for_save == "OpenAI" else DEFAULT_OLLAMA_MODEL
-
-                    # --- Read current UI values or session defaults ---
-                    yt_url = st.session_state.get("yt_url", prefs_dict.get("yt_url", ""))
-                    persist_dir = st.session_state.get("persist_dir", prefs_dict.get("persist_dir", ""))
-
-                    emb_backend = st.session_state.get("emb_provider_select", prefs_dict.get("emb_backend", "OpenAI"))
-                    emb_model_name = st.session_state.get("emb_model", prefs_dict.get("emb_model_name", "text-embedding-3-small"))
-
-                    llm_temperature = st.session_state.get("llm_temperature", prefs_dict.get("llm_temperature", 0.2))
-                    max_distance = st.session_state.get("max_distance", prefs_dict.get("max_distance", 0.9))
-                    show_prompt = st.session_state.get("show_prompt", prefs_dict.get("show_prompt", True))
-                    collection_selected = st.session_state.get("collection_selected", prefs_dict.get("collection_selected"))
-                    new_collection_name = st.session_state.get("new_collection_name_input", prefs_dict.get("new_collection_name", "tickets"))
-
-                    # --- Chunking ---
-                    enable_chunking = bool(st.session_state.get("enable_chunking", prefs_dict.get("enable_chunking", True)))
-                    chunk_size = int(st.session_state.get("chunk_size", prefs_dict.get("chunk_size", 800)))
-                    chunk_overlap = int(st.session_state.get("chunk_overlap", prefs_dict.get("chunk_overlap", 80)))
-                    chunk_min = int(st.session_state.get("chunk_min", prefs_dict.get("chunk_min", 512)))
-
-                    # --- Advanced settings ---
-                    show_distances = bool(st.session_state.get("adv_show_distances", prefs_dict.get("show_distances", False)))
-                    top_k = int(st.session_state.get("adv_top_k", prefs_dict.get("top_k", 5)))
-                    collapse_duplicates = bool(st.session_state.get("adv_collapse_duplicates", prefs_dict.get("collapse_duplicates", True)))
-                    per_parent_display = int(st.session_state.get("adv_per_parent_display", prefs_dict.get("per_parent_display", 1)))
-                    per_parent_prompt = int(st.session_state.get("adv_per_parent_prompt", prefs_dict.get("per_parent_prompt", 3)))
-                    stitch_max_chars = int(st.session_state.get("adv_stitch_max_chars", prefs_dict.get("stitch_max_chars", 1500)))
-
-                    # --- Solutions memory settings ---
-                    enable_memory = bool(st.session_state.get("enable_memory", prefs_dict.get("enable_memory", False)))
-                    mem_ttl_days = int(st.session_state.get("mem_ttl_days", prefs_dict.get("mem_ttl_days", DEFAULT_MEM_TTL_DAYS)))
-                    mem_show_full = bool(st.session_state.get("mem_show_full", prefs_dict.get("mem_show_full", False)))
-                    show_memories = bool(st.session_state.get("show_memories", prefs_dict.get("show_memories", False)))
-
-                    # --- Save all prefs ---
-                    new_prefs = {
-                        "yt_url": yt_url,
-                        "persist_dir": persist_dir,
-                        "emb_backend": emb_backend,
-                        "emb_model_name": emb_model_name,
-                        "llm_provider": _provider_for_save,
-                        "llm_model": _model_for_save,
-                        "llm_temperature": llm_temperature,
-                        "max_distance": max_distance,
-                        "show_prompt": show_prompt,
-                        "collection_selected": collection_selected,
-                        "new_collection_name": new_collection_name,
-                        "enable_chunking": enable_chunking,
-                        "chunk_size": chunk_size,
-                        "chunk_overlap": chunk_overlap,
-                        "chunk_min": chunk_min,
-                        "show_distances": show_distances,
-                        "top_k": top_k,
-                        "collapse_duplicates": collapse_duplicates,
-                        "per_parent_display": per_parent_display,
-                        "per_parent_prompt": per_parent_prompt,
-                        "stitch_max_chars": stitch_max_chars,
-                        "enable_memory": enable_memory,
-                        "mem_ttl_days": mem_ttl_days,
-                        "mem_show_full": mem_show_full,
-                        "show_memories": show_memories,
-                        "prefs_enabled": prefs_enabled,
-                    }
-
-                    save_prefs(new_prefs)
-                    st.session_state["prefs"] = load_prefs()
-                    st.success("Preferences saved.")
-                    st.toast("Saved to .app_prefs.json", icon="✅")
-
-                except Exception as e:
-                    import traceback, textwrap
-                    st.error(f"Errore durante il salvataggio: {e}")
-                    st.code(textwrap.dedent(traceback.format_exc()))
-            else:
-                st.info("Preferences memory disabled.")
+            saved_path = save_active_project_prefs(show_success=False)
+            st.success(f"Saved preferences to project file: {saved_path}")
 
     with c2:
         if st.button("Restore defaults"):
             try:
-                if os.path.exists(PREFS_PATH):
-                    os.remove(PREFS_PATH)
+                if os.path.exists(_get_active_prefs_path()):
+                    os.remove(_get_active_prefs_path())
                 st.session_state["prefs"] = {}
                 st.success("Preferences restored. Reload the page to see the defaults.")
                 st.rerun()
@@ -2420,6 +2808,10 @@ def render_phase_preferences_debug_page(prefs):
 def run_streamlit_app():
     st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
     inject_global_css()
+
+    init_projects_in_session()
+    render_project_selector()
+
     init_prefs_in_session()
     # === Robust prefs loading & one-time bootstrap ===
     DEFAULT_PREFS = {
@@ -2752,7 +3144,7 @@ def run_streamlit_app():
 
         persist_dir = st.session_state.get(
             "persist_dir",
-            prefs.get("persist_dir", DEFAULT_CHROMA_DIR) if isinstance(prefs, dict) else DEFAULT_CHROMA_DIR,
+            prefs.get("persist_dir", _default_active_persist_dir()) if isinstance(prefs, dict) else _default_active_persist_dir(),
         )
 
         # Determine the effective collection name:

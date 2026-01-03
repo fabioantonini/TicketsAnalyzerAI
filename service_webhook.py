@@ -1,64 +1,99 @@
 # service_webhook.py
 # Comments in English, as requested.
+#
+# Multi-project webhook:
+# - Resolves project config from an on-disk registry (no environment variables required)
+# - Uses the same Chroma + retrieval logic as the Streamlit UI (rag_core.py)
+# - Posts "similar tickets" suggestions as a YouTrack comment
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import time
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-from rag_core import (
-    load_chroma_collection,
-    RetrievalConfig,
-    retrieve_and_build_prompt,
-)
+from rag_core import load_chroma_collection, RetrievalConfig, retrieve_and_build_prompt
 
 # ----------------------------
-# Configuration (env vars)
+# Paths (no env vars required)
 # ----------------------------
-CHROMA_DIR_ENV = os.getenv("CHROMA_DIR", os.getenv("PERSIST_DIR", "")).strip()
-APP_PREFS_PATH = os.getenv("APP_PREFS_PATH", ".app_prefs.json").strip()
-MEM_COLLECTION = os.getenv("MEM_COLLECTION", "memories")  # optional
-ENABLE_MEMORY = os.getenv("ENABLE_MEMORY", "0").strip() == "1"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+REGISTRY_PATH = os.path.join(APP_DIR, ".taai_projects.json")
+DEFAULT_PROJECTS_DIR = os.path.join(APP_DIR, "projects")
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
-
-YT_BASE_URL = os.getenv("YT_BASE_URL", "").rstrip("/")
-YT_TOKEN = os.getenv("YT_TOKEN", "").strip()
-
-# Retrieval knobs
-TOP_K = int(os.getenv("TOP_K", "5"))
-MAX_DISTANCE = float(os.getenv("MAX_DISTANCE", "0.9"))
-PER_PARENT_DISPLAY = int(os.getenv("PER_PARENT_DISPLAY", "1"))
-PER_PARENT_PROMPT = int(os.getenv("PER_PARENT_PROMPT", "3"))
-STITCH_MAX_CHARS = int(os.getenv("STITCH_MAX_CHARS", "1500"))
-MEM_CAP = int(os.getenv("MEM_CAP", "2"))
-
-# OpenAI embeddings
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY_EXPERIMENTS", "")).strip()
+# Comment marker used for idempotency (avoid duplicates)
+RAG_MARKER = "<!--RAG_SIMILAR_v1-->"
 
 # ----------------------------
-# Minimal embedder (same behavior as UI)
+# Models
+# ----------------------------
+class IssueCreatedPayload(BaseModel):
+    issue_id: str
+    id_readable: Optional[str] = None
+    summary: Optional[str] = None
+    description: Optional[str] = None
+
+    # Optional explicit routing (recommended if issue_id is an internal id)
+    project_key: Optional[str] = None
+    project_short_name: Optional[str] = None
+
+    # Optional override for KB selection
+    kb_collection: Optional[str] = None
+
+
+@dataclass
+class ProjectConfig:
+    project_key: str
+    yt_url: str
+    yt_token: str
+    webhook_secret: str
+    persist_dir: str
+
+    # Optional secrets for embeddings (OpenAI)
+    openai_api_key: str = ""
+
+    # Retrieval knobs
+    top_k: int = 5
+    max_distance: float = 0.9
+    collapse_duplicates: bool = True
+    per_parent_display: int = 1
+    per_parent_prompt: int = 3
+    stitch_max_chars: int = 1600
+
+    # Embeddings defaults (fallback when collection meta is missing)
+    emb_backend: str = "OpenAI"
+    emb_model_name: str = "text-embedding-3-small"
+
+    # Memory (optional)
+    enable_memory: bool = False
+    mem_collection: str = "memories"
+    mem_ttl_days: int = 180
+    mem_cap: int = 2
+
+
+# ----------------------------
+# Embeddings
 # ----------------------------
 class Embedder:
     """Simple embedding wrapper supporting OpenAI or sentence-transformers."""
 
-    def __init__(self, provider: str, model: str):
+    def __init__(self, provider: str, model: str, *, openai_api_key: str = ""):
         self.provider = (provider or "").strip().lower()
         self.model = (model or "").strip()
+        self.openai_api_key = (openai_api_key or "").strip()
 
         if self.provider == "openai":
-            if not OPENAI_API_KEY:
-                raise RuntimeError("OPENAI_API_KEY not set")
+            if not self.openai_api_key:
+                raise RuntimeError("OpenAI embeddings selected but 'openai_api_key' is missing in the project config.")
             from openai import OpenAI  # lazy import
-            self.client = OpenAI(api_key=OPENAI_API_KEY)
-        elif self.provider in ("sentence-transformers", "local", "st"):
+            self.client = OpenAI(api_key=self.openai_api_key)
+        elif self.provider in ("sentence-transformers", "sentence_transformers", "local", "st"):
             from sentence_transformers import SentenceTransformer  # lazy import
             self.model_st = SentenceTransformer(self.model or "all-MiniLM-L6-v2")
         else:
@@ -69,9 +104,110 @@ class Embedder:
         if self.provider == "openai":
             res = self.client.embeddings.create(model=self.model, input=[text])
             return res.data[0].embedding  # type: ignore
-        # sentence-transformers
         vec = self.model_st.encode([text], normalize_embeddings=True)[0]
-        return vec.tolist()
+        return vec.tolist() if hasattr(vec, "tolist") else list(vec)
+
+
+# ----------------------------
+# Registry + config loading
+# ----------------------------
+def _normalize_project_key(k: str) -> str:
+    return (k or "").strip().lower().replace(" ", "_")
+
+
+def _load_json(path: str) -> Dict[str, Any]:
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+    except Exception:
+        return {}
+    return {}
+
+
+def _load_registry() -> Dict[str, Any]:
+    reg = _load_json(REGISTRY_PATH)
+    if reg.get("projects") is None:
+        reg["projects"] = {}
+    return reg
+
+
+def _get_project_prefs_path(registry: Dict[str, Any], project_key: str) -> str:
+    project_key = _normalize_project_key(project_key)
+    pinfo = (registry.get("projects") or {}).get(project_key) or {}
+    prefs_path = (pinfo.get("prefs_path") or "").strip()
+    if prefs_path:
+        if not os.path.isabs(prefs_path):
+            prefs_path = os.path.join(APP_DIR, prefs_path)
+        return prefs_path
+    return os.path.join(DEFAULT_PROJECTS_DIR, project_key, "app_prefs.json")
+
+
+def _parse_project_short_name_from_readable(s: str) -> Optional[str]:
+    s = (s or "").strip()
+    if "-" not in s:
+        return None
+    left = s.split("-", 1)[0].strip()
+    return left or None
+
+
+def _resolve_project_key_from_payload(payload: IssueCreatedPayload) -> Optional[str]:
+    # Explicit routing always wins
+    for k in [payload.project_key, payload.project_short_name]:
+        if k and k.strip():
+            return _normalize_project_key(k)
+
+    # Try parsing NETKB-3 -> netkb
+    for s in [payload.id_readable, payload.issue_id]:
+        short = _parse_project_short_name_from_readable(s or "")
+        if short:
+            return _normalize_project_key(short)
+
+    return None
+
+
+def _load_project_config(project_key: str) -> ProjectConfig:
+    registry = _load_registry()
+    prefs_path = _get_project_prefs_path(registry, project_key)
+    prefs = _load_json(prefs_path)
+
+    yt_url = (prefs.get("yt_url") or "").rstrip("/")
+    yt_token = (prefs.get("yt_token") or "").strip()
+    webhook_secret = (prefs.get("webhook_secret") or "").strip()
+
+    persist_dir = (prefs.get("persist_dir") or "").strip()
+    if persist_dir and not os.path.isabs(persist_dir):
+        persist_dir = os.path.join(APP_DIR, persist_dir)
+    if not persist_dir:
+        persist_dir = os.path.join(APP_DIR, "data", "chroma")
+
+    if not yt_url:
+        raise RuntimeError(f"Project '{project_key}': missing 'yt_url' in {prefs_path}")
+    if not yt_token:
+        raise RuntimeError(f"Project '{project_key}': missing 'yt_token' in {prefs_path}")
+    if not webhook_secret:
+        raise RuntimeError(f"Project '{project_key}': missing 'webhook_secret' in {prefs_path}")
+
+    return ProjectConfig(
+        project_key=_normalize_project_key(project_key),
+        yt_url=yt_url,
+        yt_token=yt_token,
+        webhook_secret=webhook_secret,
+        persist_dir=persist_dir,
+        openai_api_key=(prefs.get("openai_api_key") or "").strip(),
+        top_k=int(prefs.get("top_k", 5)),
+        max_distance=float(prefs.get("max_distance", 0.9)),
+        collapse_duplicates=bool(prefs.get("collapse_duplicates", True)),
+        per_parent_display=int(prefs.get("per_parent_display", 1)),
+        per_parent_prompt=int(prefs.get("per_parent_prompt", 3)),
+        stitch_max_chars=int(prefs.get("stitch_max_chars", 1600)),
+        emb_backend=str(prefs.get("emb_backend", "OpenAI")),
+        emb_model_name=str(prefs.get("emb_model_name", "text-embedding-3-small")),
+        enable_memory=bool(prefs.get("enable_memory", False)),
+        mem_collection=str(prefs.get("mem_collection", "memories")),
+        mem_ttl_days=int(prefs.get("mem_ttl_days", 180)),
+        mem_cap=int(prefs.get("mem_cap", 2)),
+    )
 
 
 def _read_collection_meta(persist_dir: str, collection: str) -> Tuple[Optional[str], Optional[str]]:
@@ -90,253 +226,221 @@ def _read_collection_meta(persist_dir: str, collection: str) -> Tuple[Optional[s
     return None, None
 
 
-def _yt_headers() -> Dict[str, str]:
-    if not YT_BASE_URL or not YT_TOKEN:
-        raise RuntimeError("YT_BASE_URL and/or YT_TOKEN not configured")
-    return {"Authorization": f"Bearer {YT_TOKEN}", "Content-Type": "application/json"}
+def _backend_to_provider(emb_backend: str) -> str:
+    b = (emb_backend or "").strip().lower()
+    if b in ("openai",):
+        return "openai"
+    if b in ("sentence-transformers", "sentence_transformers", "local", "st"):
+        return "sentence-transformers"
+    return "openai"
 
-def _load_app_prefs(prefs_path: str) -> Dict[str, Any]:
-    if not prefs_path:
-        return {}
-    try:
-        if os.path.isfile(prefs_path):
-            with open(prefs_path, "r", encoding="utf-8") as f:
-                return json.load(f) or {}
-    except Exception:
-        return {}
-    return {}
 
-def _resolve_chroma_dir() -> str:
-    if CHROMA_DIR_ENV:
-        return CHROMA_DIR_ENV
-    prefs = _load_app_prefs(APP_PREFS_PATH)
-    persist_dir = (prefs.get("persist_dir") or "").strip()
-    if persist_dir:
-        return persist_dir
-    return "./data/chroma"
+# ----------------------------
+# YouTrack helpers (stateless)
+# ----------------------------
+def _yt_headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-def _parse_project_short_name_from_readable(id_readable: str) -> Optional[str]:
-    s = (id_readable or "").strip()
-    if "-" not in s:
-        return None
-    left = s.split("-", 1)[0].strip()
-    if not left:
-        return None
-    return left
 
-def _resolve_kb_collection_name(
-    payload_kb_collection: Optional[str],
-    issue_id: str,
-    id_readable: str,
-    issue_obj: Optional[Dict[str, Any]],
-) -> str:
-    if payload_kb_collection and payload_kb_collection.strip():
-        return payload_kb_collection.strip().lower()
-    if issue_obj:
-        proj = issue_obj.get("project") or {}
-        short = (proj.get("shortName") or "").strip()
-        if short:
-            return short.lower()
-    short = _parse_project_short_name_from_readable(id_readable) \
-        or _parse_project_short_name_from_readable(issue_id)
-    if short:
-        return short.lower()
-    return "tickets"
-
-def yt_get_issue(issue_id: str) -> Dict[str, Any]:
-    """Fetch issue details from YouTrack by internal issue id."""
-    url = f"{YT_BASE_URL}/api/issues/{issue_id}"
-    params = {"fields": "id,idReadable,summary,description,project(shortName,name)"}
-    r = requests.get(url, headers=_yt_headers(), params=params, timeout=30)
+def yt_get_issue(yt_url: str, token: str, issue_id: str) -> Dict[str, Any]:
+    fields = "id,idReadable,summary,description,project(shortName,name)"
+    url = f"{yt_url}/api/issues/{issue_id}"
+    r = requests.get(url, headers=_yt_headers(token), params={"fields": fields}, timeout=30)
     r.raise_for_status()
     return r.json()
 
-def yt_has_rag_comment(issue_id: str) -> bool:
-    url = f"{YT_BASE_URL}/api/issues/{issue_id}/comments"
-    params = {"fields": "text"}
-    r = requests.get(url, headers=_yt_headers(), params=params, timeout=30)
-    r.raise_for_status()
-    for c in r.json():
-        if "<!--RAG_SIMILAR_v1-->" in (c.get("text") or ""):
-            return True
-    return False
 
-def yt_add_comment(issue_id: str, text: str) -> None:
-    """Add comment to issue."""
-    url = f"{YT_BASE_URL}/api/issues/{issue_id}/comments"
-    payload = {"text": text}
-    r = requests.post(url, headers=_yt_headers(), json=payload, timeout=30)
+def yt_list_comments(yt_url: str, token: str, issue_id: str) -> List[Dict[str, Any]]:
+    url = f"{yt_url}/api/issues/{issue_id}/comments"
+    r = requests.get(url, headers=_yt_headers(token), params={"fields": "id,text"}, timeout=30)
+    r.raise_for_status()
+    return r.json() or []
+
+
+def yt_add_comment(yt_url: str, token: str, issue_id: str, text: str) -> None:
+    url = f"{yt_url}/api/issues/{issue_id}/comments"
+    r = requests.post(url, headers=_yt_headers(token), json={"text": text}, timeout=30)
     r.raise_for_status()
 
 
-def _format_similar_comment(
-    issue_id_readable: str,
-    merged_collapsed_view: List[Tuple[str, dict, float, str]],
-    yt_base_url: str,
-) -> str:
-    """Build a readable comment. Keep it concise."""
-    lines = []
-    lines.append(f"🤖 Similar tickets suggestion for **{issue_id_readable}**")
-    lines.append("")
-    if not merged_collapsed_view:
-        lines.append("No similar tickets found in the knowledge base (within the configured threshold).")
-        return "\n".join(lines)
+# ----------------------------
+# Comment formatting
+# ----------------------------
+def _format_similar_comment(items: List[Tuple[str, Dict[str, Any], float, str]], cfg: ProjectConfig) -> str:
+    """Format a YouTrack comment listing the most similar tickets."""
+    if not items:
+        return "No similar tickets found.\n\n" + RAG_MARKER
 
-    lines.append("Top similar items:")
-    for doc, meta, dist, src in merged_collapsed_view:
-        if src != "KB":
-            # Optionally include MEM items; usually keep KB only in comments
-            continue
-        meta = meta or {}
-        rid = (meta.get("id_readable") or "").strip()
-        summ = (meta.get("summary") or "").strip()
-        if rid:
-            link = f"{yt_base_url.rstrip('/')}/issue/{rid}" if yt_base_url else ""
-            label = f"{rid} — {summ}" if summ else rid
-            if link:
-                lines.append(f"- {label} (distance={dist:.3f}) → {link}")
-            else:
-                lines.append(f"- {label} (distance={dist:.3f})")
-        else:
-            # fallback
-            preview = (doc or "").strip().replace("\n", " ")
-            lines.append(f"- (distance={dist:.3f}) {preview[:140]}...")
+    lines: List[str] = []
+    lines.append("Similar tickets found in the Knowledge Base:")
+    lines.append("")
 
-    lines.append("")
-    lines.append("_Generated automatically on issue creation._")
-    lines.append("")
-    lines.append("<!--RAG_SIMILAR_v1-->")
+    for i, (_doc, meta, dist, _src) in enumerate(items, start=1):
+        issue = (meta or {}).get("id_readable") or (meta or {}).get("key") or "UNKNOWN"
+        summary = (meta or {}).get("summary") or ""
+        summary = summary.replace("\n", " ").strip()
+        if len(summary) > 140:
+            summary = summary[:137] + "..."
+        link = f"{cfg.yt_url}/issue/{issue}"
+        lines.append(f"{i}) {issue} — {summary}")
+        lines.append(f"   {link}")
+        lines.append(f"   distance: {dist:.3f}")
+        lines.append("")
+
+    lines.append(RAG_MARKER)
     return "\n".join(lines)
 
 
+def _has_marker_comment(comments: List[Dict[str, Any]]) -> bool:
+    return any(RAG_MARKER in (c.get("text") or "") for c in (comments or []))
+
+
 # ----------------------------
-# FastAPI
+# FastAPI app
 # ----------------------------
-app = FastAPI(title="YouTrack RAG Webhook", version="1.0")
-
-
-class IssueCreatedPayload(BaseModel):
-    # Prefer internal issue id from YouTrack workflow
-    issue_id: str
-
-    # Optional fields (you can send them directly from workflow to avoid GET)
-    id_readable: Optional[str] = None
-    summary: Optional[str] = None
-    description: Optional[str] = None
-
-    # Optional override
-    kb_collection: Optional[str] = None
+app = FastAPI(title="TicketsAnalyzerAI Webhook", version="2.0")
 
 
 @app.post("/yt/issue-created")
-def issue_created(
-    payload: IssueCreatedPayload,
-    x_webhook_secret: Optional[str] = Header(default=None),
-):
-    # 1) Security check (optional but recommended)
-    if WEBHOOK_SECRET:
-        if not x_webhook_secret or x_webhook_secret != WEBHOOK_SECRET:
-            raise HTTPException(status_code=401, detail="Invalid webhook secret")
-
-    # 2) Get issue text
-    issue_id = payload.issue_id.strip()
+def issue_created(payload: IssueCreatedPayload, x_webhook_secret: Optional[str] = Header(default=None)):
+    issue_id = (payload.issue_id or "").strip()
     if not issue_id:
         raise HTTPException(status_code=400, detail="issue_id is required")
 
+    # Resolve project config
+    project_key = _resolve_project_key_from_payload(payload)
+    if not project_key:
+        registry = _load_registry()
+        projects = sorted((registry.get("projects") or {}).keys())
+        if len(projects) == 1:
+            project_key = projects[0]
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot resolve project. Provide payload.project_key/project_short_name or id_readable like 'NETKB-3'.",
+            )
+
+    try:
+        cfg = _load_project_config(project_key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load project config for '{project_key}': {e}")
+
+    # Project-scoped webhook secret validation
+    if cfg.webhook_secret:
+        if not x_webhook_secret or x_webhook_secret != cfg.webhook_secret:
+            raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    # Fetch issue if needed
     id_readable = (payload.id_readable or "").strip()
     summary = (payload.summary or "").strip()
     description = (payload.description or "").strip()
-    issue_obj = None
 
     if not (summary or description):
-        # Fetch from YouTrack if not provided
         try:
-            issue = yt_get_issue(issue_id)
-            id_readable = id_readable or (issue.get("idReadable") or "")
-            summary = summary or (issue.get("summary") or "")
-            description = description or (issue.get("description") or "")
+            issue_obj = yt_get_issue(cfg.yt_url, cfg.yt_token, issue_id)
+            id_readable = id_readable or (issue_obj.get("idReadable") or "")
+            summary = summary or (issue_obj.get("summary") or "")
+            description = description or (issue_obj.get("description") or "")
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Failed to fetch issue from YouTrack: {e}")
 
     query_text = (summary + "\n\n" + description).strip()
 
-    # 3) Load KB (and optional MEM) collections via rag_core
-    chroma_dir = _resolve_chroma_dir()
-    kb_name = _resolve_kb_collection_name(
-        payload.kb_collection, issue_id, id_readable, issue_obj)
-    kb_coll = load_chroma_collection(chroma_dir, kb_name, space="cosine")
+    # Resolve KB collection:
+    # - payload override wins
+    # - otherwise use issue prefix/project key (NETKB-3 -> 'netkb')
+    if payload.kb_collection and payload.kb_collection.strip():
+        kb_name = payload.kb_collection.strip().lower()
+    else:
+        short = _parse_project_short_name_from_readable(id_readable) or _parse_project_short_name_from_readable(issue_id) or cfg.project_key
+        kb_name = (short or cfg.project_key).strip().lower()
 
+    # Open KB collection
+    kb_coll = load_chroma_collection(cfg.persist_dir, kb_name, space="cosine")
+
+    # Optional MEM collection
     mem_coll = None
-    if ENABLE_MEMORY:
+    if cfg.enable_memory:
         try:
-            mem_coll = load_chroma_collection(CHROMA_DIR, MEM_COLLECTION, space="cosine")
+            mem_coll = load_chroma_collection(cfg.persist_dir, cfg.mem_collection, space="cosine")
         except Exception:
-            mem_coll = None  # do not fail the webhook if MEM is not available
+            mem_coll = None
 
-    # 4) Ensure embeddings match the collection used for indexing
-    provider, model = _read_collection_meta(chroma_dir, kb_name)
-    provider = provider or "openai"
-    model = model or "text-embedding-3-small"
+    # Embeddings provider/model must match the collection used for indexing (meta file if present).
+    provider, model = _read_collection_meta(cfg.persist_dir, kb_name)
+    provider = provider or _backend_to_provider(cfg.emb_backend)
+    model = model or cfg.emb_model_name
 
+    # Build query embedding
     try:
-        embedder = Embedder(provider=provider, model=model)
-        q_vec = embedder.embed_one(query_text)
+        embedder = Embedder(provider, model, openai_api_key=cfg.openai_api_key)
+        query_emb = embedder.embed_one(query_text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to embed query: {e}")
 
-    # 5) Retrieval + prompt (prompt is available if you later want to auto-answer too)
-    cfg = RetrievalConfig(
-        top_k=TOP_K,
-        max_distance=MAX_DISTANCE,
-        collapse_duplicates=True,
-        per_parent_display=PER_PARENT_DISPLAY,
-        per_parent_prompt=PER_PARENT_PROMPT,
-        stitch_max_chars=STITCH_MAX_CHARS,
+    # Build retrieval config
+    rconf = RetrievalConfig(
+        top_k=cfg.top_k,
+        max_distance=cfg.max_distance,
+        collapse_duplicates=cfg.collapse_duplicates,
+        per_parent_display=cfg.per_parent_display,
+        per_parent_prompt=cfg.per_parent_prompt,
+        stitch_max_chars=cfg.stitch_max_chars,
     )
 
+    now_ts = int(time.time())
+
+    # Run retrieval
     prompt, merged_view, _merged_prompt = retrieve_and_build_prompt(
         query=query_text,
-        query_embedding=q_vec,
+        query_embedding=query_emb,
         kb_collection=kb_coll,
         mem_collection=mem_coll,
-        cfg=cfg,
-        now_ts=int(time.time()),
-        mem_cap=MEM_CAP,
+        cfg=rconf,
+        now_ts=now_ts,
+        mem_cap=cfg.mem_cap,
     )
 
-    # Remove self-reference (same issue)
-    self_ids = {issue_id, id_readable}
-    merged_view = [
-        (doc, meta, dist, src)
-        for (doc, meta, dist, src) in merged_view
-        if (meta or {}).get("id_readable") not in self_ids
-    ]
+    # Remove self-hit (if metadata stores id_readable)
+    if id_readable:
+        merged_view = [
+            (doc, meta, dist, src)
+            for (doc, meta, dist, src) in merged_view
+            if (meta or {}).get("id_readable") != id_readable
+        ]
 
-    # 6) Write-back: comment into YouTrack
+    # Idempotency: skip if marker comment already exists
     try:
-        comment_text = _format_similar_comment(
-            issue_id_readable=id_readable or issue_id,
-            merged_collapsed_view=merged_view,
-            yt_base_url=YT_BASE_URL,
-        )
-        if yt_has_rag_comment(issue_id):
+        comments = yt_list_comments(cfg.yt_url, cfg.yt_token, issue_id)
+        if _has_marker_comment(comments):
             return {
                 "status": "skipped",
                 "reason": "rag_comment_already_present",
                 "issue_id": issue_id,
+                "id_readable": id_readable,
+                "project_key": cfg.project_key,
+                "kb_collection": kb_name,
+                "found": len(merged_view),
             }
-        yt_add_comment(issue_id, comment_text)
+    except Exception:
+        pass  # fail-open
+
+    # Format + post comment
+    comment_text = _format_similar_comment(merged_view, cfg)
+    try:
+        yt_add_comment(cfg.yt_url, cfg.yt_token, issue_id, comment_text)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to add comment in YouTrack: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to add comment to YouTrack: {e}")
 
     return {
         "status": "ok",
         "issue_id": issue_id,
         "id_readable": id_readable,
+        "project_key": cfg.project_key,
         "kb_collection": kb_name,
+        "persist_dir": cfg.persist_dir,
         "provider": provider,
         "model": model,
         "found": len(merged_view),
-        # helpful for debugging / future extensions:
         "prompt_preview": prompt[:400],
     }
