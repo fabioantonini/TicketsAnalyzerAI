@@ -214,3 +214,4 @@ data_docker/
 .app_prefs.json
 projects/**/app_prefs.json
 .taai_projects.json
+projects/**/chroma
