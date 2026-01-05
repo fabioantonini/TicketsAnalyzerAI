@@ -48,6 +48,49 @@ try:
 except Exception:
     pass
 
+def _rmtree_with_retries(path: str, *, retries: int = 8) -> None:
+    """
+    Robust folder deletion (Windows-safe).
+    Chroma uses sqlite + mmap; on Windows rmtree may fail due to file locks.
+    This function retries with gc and small backoff.
+    """
+    import os
+    import gc
+    import time
+    import stat
+
+    if not path:
+        return
+    if not os.path.exists(path):
+        return
+
+    def _onerror(func, p, exc_info):
+        # Make read-only files writable and retry
+        try:
+            os.chmod(p, stat.S_IWRITE)
+        except Exception:
+            pass
+        try:
+            func(p)
+        except Exception:
+            pass
+
+    last_err = None
+    for i in range(max(1, retries)):
+        try:
+            shutil.rmtree(path, onerror=_onerror)
+            return
+        except Exception as e:
+            last_err = e
+            try:
+                gc.collect()
+            except Exception:
+                pass
+            time.sleep(0.2 * (i + 1))
+
+    raise last_err
+
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def is_cloud() -> bool:
@@ -69,42 +112,12 @@ def is_cloud() -> bool:
 
 IS_CLOUD = is_cloud()
 
-def pick_default_chroma_dir() -> str:
-    env_dir = os.getenv("CHROMA_DIR")
-    if env_dir:
-        return env_dir
-
-    # also support st.secrets["CHROMA_DIR"]
-    try:
-        import streamlit as st  # type: ignore
-        import gc
-        sec_dir = st.secrets.get("CHROMA_DIR") if hasattr(st, "secrets") else None
-        if sec_dir:
-            return str(sec_dir)
-    except Exception:
-        pass
-
-    # We already checked writability in is_cloud(); rely only on that.
-    if IS_CLOUD:
-        # cloud / ambienti read-only → usa /tmp
-        return "/tmp/chroma"
-
-    # local / docker con codice scrivibile → usa cartella del progetto
-    return os.path.join(APP_DIR, "data", "chroma")
-
-
-DEFAULT_CHROMA_DIR = pick_default_chroma_dir()
-
-# Preferences path: write to /tmp in cloud
-PREFS_PATH = os.path.join("/tmp", ".app_prefs.json") if IS_CLOUD else os.path.join(APP_DIR, ".app_prefs.json")
 
 # === MULTI-PROJECT SUPPORT (auto-inserted) ===
 # Registry file storing the list of projects and the active one.
 PROJECTS_REGISTRY_PATH = os.path.join("/tmp", ".taai_projects.json") if IS_CLOUD else os.path.join(APP_DIR, ".taai_projects.json")
 PROJECTS_ROOT_DIR = os.path.join("/tmp", "projects") if IS_CLOUD else os.path.join(APP_DIR, "projects")
-
-# Old single-project prefs location (used for one-time migration).
-OLD_PREFS_PATH = os.path.join("/tmp", ".app_prefs.json") if IS_CLOUD else os.path.join(APP_DIR, ".app_prefs.json")
+os.makedirs(PROJECTS_ROOT_DIR, exist_ok=True)
 
 def _normalize_project_key(k: str) -> str:
     return (k or "").strip().lower().replace(" ", "_")
@@ -127,16 +140,13 @@ def _ensure_registry() -> dict:
     reg = _load_json_file(PROJECTS_REGISTRY_PATH)
     reg.setdefault("active_project", "default")
     reg.setdefault("projects", {})
+
     if "default" not in reg["projects"]:
-        reg["projects"]["default"] = {"name": "Default", "prefs_path": os.path.join("projects", "default", "app_prefs.json")}
-    # One-time migration: if old prefs exist and default project prefs do not, copy them.
-    default_prefs_abs = os.path.join(APP_DIR, reg["projects"]["default"]["prefs_path"])
-    if os.path.exists(OLD_PREFS_PATH) and not os.path.exists(default_prefs_abs):
-        os.makedirs(os.path.dirname(default_prefs_abs), exist_ok=True)
-        try:
-            shutil.copy2(OLD_PREFS_PATH, default_prefs_abs)
-        except Exception:
-            pass
+        reg["projects"]["default"] = {
+            "name": "Default",
+            "prefs_path": os.path.join("projects", "default", "app_prefs.json"),
+        }
+
     _save_json_file(PROJECTS_REGISTRY_PATH, reg)
     return reg
 
@@ -164,24 +174,62 @@ def _get_project_prefs_path(project_key: str) -> str:
     info = (reg.get("projects") or {}).get(k) or {}
     rel = (info.get("prefs_path") or os.path.join("projects", k, "app_prefs.json")).strip()
     if not os.path.isabs(rel):
-    # Map "projects/<k>/app_prefs.json" under PROJECTS_ROOT_DIR
+        # Map "projects/<k>/app_prefs.json" under PROJECTS_ROOT_DIR
         rel = rel.replace("\\", "/")
         if rel.startswith("projects/"):
             rel = rel[len("projects/"):]
         return os.path.join(PROJECTS_ROOT_DIR, rel)
     return rel
 
+def _clear_project_pref_session_state() -> None:
+    """Clear per-project prefs from session_state so next run reloads from the active project's file."""
+    try:
+        # Remove canonical pref keys
+        for k in PREF_KEYS:
+            st.session_state.pop(k, None)
+
+        # Remove any "prefs_*" shadow keys
+        for k in list(st.session_state.keys()):
+            if k.startswith("prefs_"):
+                st.session_state.pop(k, None)
+
+        # Remove cached dict
+        st.session_state.pop("prefs", None)
+
+        # Remove vector-db cache keys (so DB handles don't stick to previous project)
+        for k in ("vector", "vs_collection", "vs_persist_dir", "vs_count"):
+            st.session_state.pop(k, None)
+    except Exception:
+        pass
+
+def _get_projects_root_dir() -> str:
+    """
+    Return the projects root directory.
+    On Streamlit Cloud, use /tmp to ensure the filesystem is writable.
+    """
+    if IS_CLOUD:
+        return os.path.join("/tmp", "projects")
+    return os.path.join(APP_DIR, "projects")
+
+
 def _get_active_prefs_path() -> str:
     return _get_project_prefs_path(_get_active_project_key())
 
-def _resolve_persist_dir(persist_dir: str) -> str:
-    """Resolve persist_dir (which can be relative) to an absolute path."""
+def _resolve_persist_dir(persist_dir: str, *, base_dir: Optional[str] = None) -> str:
+    """
+    Resolve persist_dir (which can be relative) to an absolute path.
+
+    Option B:
+      - Relative persist_dir is resolved relative to the *project folder* (base_dir)
+      - Fallback base_dir = APP_DIR for legacy cases
+    """
     if not persist_dir:
         return ""
-    # Relative paths are interpreted relative to APP_DIR (repo folder)
+    bd = base_dir or APP_DIR
     if not os.path.isabs(persist_dir):
-        return os.path.abspath(os.path.join(APP_DIR, persist_dir))
-    return persist_dir
+        return os.path.abspath(os.path.join(bd, persist_dir))
+    return os.path.abspath(persist_dir)
+
 
 def _safe_rmtree(path: str) -> bool:
     """Remove a directory tree. Return True if removed, False otherwise."""
@@ -200,7 +248,13 @@ def _default_project_persist_dir(project_key: str) -> str:
     return os.path.join(_get_project_dir(project_key), "chroma")
 
 def delete_project(project_key: str, *, delete_project_folder: bool = True, delete_vector_db: bool = False) -> str:
-    """Delete a project from registry and remove its prefs file and (optionally) its vector DB."""
+    """
+    Delete a project from registry and remove its prefs file and (optionally) its Vector DB.
+
+    Option B:
+      - Vector DB is always under projects/<project_key>/chroma
+      - Even if app_prefs.json is missing, we can still delete the chroma folder.
+    """
     project_key = _normalize_project_key(project_key)
     if project_key == "default":
         raise ValueError("Cannot delete 'default' project")
@@ -211,21 +265,16 @@ def delete_project(project_key: str, *, delete_project_folder: bool = True, dele
         return "Project not found (already deleted)."
 
     prefs_abs = _get_project_prefs_path(project_key)
+    proj_dir = os.path.dirname(prefs_abs)
 
-    # Load prefs to find persist_dir (for optional vector DB deletion)
-    persist_dir_abs = ""
-    try:
-        if os.path.exists(prefs_abs):
-            prefs = _load_json_file(prefs_abs)
-            persist_dir_abs = _resolve_persist_dir(prefs.get("persist_dir", ""), base_dir=_get_project_dir(project_key))
-    except Exception:
-        persist_dir_abs = ""
+    # Option B: default chroma dir for the project
+    chroma_dir_abs = os.path.abspath(os.path.join(proj_dir, "chroma"))
 
     # Remove from registry
     projects.pop(project_key, None)
     reg["projects"] = projects
 
-    # If active was deleted, fallback
+    # If active was deleted, fallback to something valid
     active = _normalize_project_key(reg.get("active_project", "default"))
     if active == project_key:
         fallback = "default" if "default" in projects else (sorted(projects.keys())[0] if projects else "default")
@@ -237,60 +286,74 @@ def delete_project(project_key: str, *, delete_project_folder: bool = True, dele
 
     _save_registry(reg)
 
-    # Best-effort release any open Chroma handles before deleting folders (Windows locks sqlite)
-    if persist_dir_abs:
-        _release_vector_db_if_open(persist_dir_abs)
+    # Release handles before deletions (Windows)
+    try:
+        _release_vector_db_if_open(chroma_dir_abs)
+    except Exception:
+        pass
 
     errors: list[str] = []
+    removed_vdb = False
 
     # Delete prefs file
     try:
-        from pathlib import Path
         p = Path(prefs_abs)
         if p.exists():
             p.unlink()
     except Exception as e:
         errors.append(f"prefs unlink failed: {e}")
 
-    # Delete project folder (force delete)
+    # Delete vector db folder (Option B folder)
+    if delete_vector_db:
+        try:
+            # 1) Best-effort release (session + gc)
+            _release_vector_db_if_open(chroma_dir_abs)
+
+            # 2) HARD reset via a fresh Chroma client (helps Windows file locks)
+            try:
+                import chromadb
+                from chromadb.config import Settings as ChromaSettings
+                if os.path.isdir(chroma_dir_abs):
+                    client = chromadb.PersistentClient(
+                        path=chroma_dir_abs,
+                        settings=ChromaSettings(anonymized_telemetry=False),
+                    )
+                    client.reset()
+                    del client
+            except Exception:
+                # Do not block deletion if reset isn't available
+                pass
+
+            # 3) Now remove the folder
+            if os.path.isdir(chroma_dir_abs):
+                _rmtree_with_retries(chroma_dir_abs)
+
+            removed_vdb = True
+        except Exception as e:
+            errors.append(f"vector db delete failed: {e}")
+    # Delete the whole project folder
     if delete_project_folder:
         try:
-            folder = os.path.dirname(prefs_abs)
-            if os.path.isdir(folder):
-                shutil.rmtree(folder)
+            if os.path.isdir(proj_dir):
+                _rmtree_with_retries(proj_dir)
         except Exception as e:
-            errors.append(f"project folder delete failed (likely file lock): {e}")
+            errors.append(f"project folder delete failed: {e}")
 
-    # Delete vector DB (optional, with safety checks)
-    removed_vdb = False
-    if delete_vector_db and persist_dir_abs:
-        app_dir_abs = os.path.abspath(APP_DIR)
-        proj_dir_abs = os.path.abspath(os.path.join(PROJECTS_ROOT_DIR, project_key))
-        persist_norm = os.path.abspath(persist_dir_abs)
-
-        try:
-            is_inside_app = os.path.commonpath([app_dir_abs, persist_norm]) == app_dir_abs
-            is_inside_proj = os.path.commonpath([proj_dir_abs, persist_norm]) == proj_dir_abs
-        except Exception:
-            is_inside_app = False
-            is_inside_proj = False
-
-        if is_inside_app or is_inside_proj:
+        # Second attempt for chroma specifically (sometimes project dir delete fails first)
+        if delete_vector_db:
             try:
-                if os.path.isdir(persist_norm):
-                    shutil.rmtree(persist_norm)
-                    removed_vdb = True
-            except Exception:
-                removed_vdb = False
+                if os.path.isdir(chroma_dir_abs):
+                    _rmtree_with_retries(chroma_dir_abs)
+                removed_vdb = True
+            except Exception as e:
+                errors.append(f"vector db second-attempt delete failed: {e}")
 
     msg = f"Deleted project '{project_key}'."
     if delete_vector_db:
-        msg += " Vector DB removed." if removed_vdb else " Vector DB NOT removed (path unsafe or missing)."
+        msg += " Vector DB removed." if removed_vdb else " Vector DB NOT removed."
     if errors:
         msg += " WARN: " + " | ".join(errors)
     return msg
-
-
 
 def _default_active_persist_dir() -> str:
     """Per-project default persist_dir for the currently active project."""
@@ -384,6 +447,13 @@ def render_project_selector() -> None:
                     dst = _get_project_prefs_path(nk)
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     shutil.copy2(src, dst)
+                    # Ensure the duplicated project does NOT inherit persist_dir from the source project
+                    try:
+                        d = _load_json_file(dst)
+                        d["persist_dir"] = "chroma"
+                        _save_json_file(dst, d)
+                    except Exception:
+                        pass
 
                     reg = _load_registry()
                     reg.setdefault("projects", {})
@@ -393,6 +463,14 @@ def render_project_selector() -> None:
 
                     st.session_state["active_project"] = nk
                     _set_active_project_key(nk)
+                    # Reset project-scoped defaults and clear cached prefs for a clean switch
+                    try:
+                        st.session_state["persist_dir"] = _default_active_persist_dir()
+                    except Exception:
+                        pass
+                    _clear_project_pref_session_state()
+
+                    _clear_project_pref_session_state()
                     st.success(f"Duplicated into '{nk}'")
                     st.rerun()
 
@@ -440,10 +518,7 @@ def render_project_selector() -> None:
     if sel != active:
         st.session_state["active_project"] = sel
         _set_active_project_key(sel)
-        # Force re-init prefs on next run
-        for k in list(st.session_state.keys()):
-            if k.startswith("prefs_"):
-                st.session_state.pop(k, None)
+        _clear_project_pref_session_state()
         st.rerun()
 
     with st.sidebar.expander("Create new project", expanded=False):
@@ -477,22 +552,36 @@ def render_project_selector() -> None:
             if not os.path.exists(prefs_abs):
                 created = False
 
-                # Option 1: copy current active prefs as starting point (includes yt_token/openai_api_key)
+                # Option 1: copy current active prefs as starting point
                 try:
                     if os.path.exists(old_prefs_abs):
                         shutil.copy2(old_prefs_abs, prefs_abs)
                         created = True
+                        # Force Model A: project-scoped Vector DB path (relative)
+                        try:
+                            d = _load_json_file(prefs_abs)
+                            d["persist_dir"] = "chroma"
+                            _save_json_file(prefs_abs, d)
+                        except Exception:
+                            pass
+                        # Force Option B: project-scoped Vector DB (after copy)
+                        try:
+                            d = _load_json_file(prefs_abs)
+                            d["persist_dir"] = "chroma"
+                            _save_json_file(prefs_abs, d)
+                        except Exception:
+                            pass
                 except Exception:
                     created = False
 
-                # Option 2: template + inherit from old prefs (including yt_token/openai_api_key)
+                # Option 2: template + inherit (NO persist_dir inheritance)
                 if not created:
                     template = {
                         "yt_url": "",
                         "yt_token": "",
                         "webhook_secret": "supersecret",
                         "openai_api_key": "",
-                        "persist_dir": "./data/chroma",
+                        "persist_dir": "chroma",
                         "emb_backend": "OpenAI",
                         "emb_model_name": "text-embedding-3-small",
                         "max_distance": 0.9,
@@ -506,11 +595,11 @@ def render_project_selector() -> None:
                         "prefs_enabled": True
                     }
 
-                    # Inherit from current project if available
+                    # Inherit from current project if available (but not persist_dir)
                     try:
                         if os.path.exists(old_prefs_abs):
                             old = _load_json_file(old_prefs_abs)
-                            for k in ("yt_url", "yt_token", "openai_api_key", "webhook_secret", "persist_dir",
+                            for k in ("yt_url", "yt_token", "openai_api_key", "webhook_secret",
                                     "emb_backend", "emb_model_name"):
                                 if old.get(k):
                                     template[k] = old[k]
@@ -519,9 +608,25 @@ def render_project_selector() -> None:
 
                     _save_json_file(prefs_abs, template)
 
+            # ALWAYS enforce Option B even if prefs file already existed
+            try:
+                d = _load_json_file(prefs_abs)
+                d["persist_dir"] = "chroma"
+                _save_json_file(prefs_abs, d)
+            except Exception:
+                pass
+
             # Switch active project only after prefs file exists
             st.session_state["active_project"] = nk
             _set_active_project_key(nk)
+            # Reset project-scoped defaults and clear cached prefs for a clean switch
+            try:
+                st.session_state["persist_dir"] = _default_active_persist_dir()
+            except Exception:
+                pass
+            _clear_project_pref_session_state()
+
+            _clear_project_pref_session_state()
             st.success(f"Project '{nk}' created and selected")
             st.rerun()
 
@@ -571,6 +676,7 @@ SENSITIVE_PREF_KEYS = {
 # NOTE: Actual saving of sensitive keys depends on 'store_secrets_in_project' flag.
 PREF_KEYS = set(NON_SENSITIVE_PREF_KEYS) | set(SENSITIVE_PREF_KEYS)
 # === END PROJECT PREF KEYS ===
+
 def load_prefs() -> dict:
     try:
         if os.path.exists(_get_active_prefs_path()):
@@ -613,28 +719,77 @@ def save_active_project_prefs(show_success: bool = True) -> str:
         for k in SENSITIVE_PREF_KEYS:
             prefs.pop(k, None)
 
+    # Normalize persist_dir for portability:
+    # if it points to the project chroma folder, store it as relative "chroma".
+    try:
+        project_key = _get_active_project_key()
+        proj_dir = _get_project_dir(project_key)
+        target_abs = os.path.abspath(os.path.join(proj_dir, "chroma"))
+
+        pd = (prefs.get("persist_dir") or "").strip()
+        if pd:
+            pd_abs = (
+                os.path.abspath(pd)
+                if os.path.isabs(pd)
+                else os.path.abspath(os.path.join(proj_dir, pd))
+            )
+            if pd_abs == target_abs:
+                prefs["persist_dir"] = "chroma"
+    except Exception:
+        pass
+
     # Persist to disk (project-scoped)
     _save_json_file(prefs_path, prefs)
 
     if show_success:
-        st.sidebar.success(f"Saved project to: {prefs_path}")
+        try:
+            st.sidebar.success(f"Saved project to: {prefs_path}")
+        except Exception:
+            pass
 
     return prefs_path
-# === END SAVE ACTIVE PROJECT PREFS ===
 
 def init_prefs_in_session():
     prefs = load_prefs() or {}
 
     active_key = _get_active_project_key()
-    proj_default = _default_project_persist_dir(active_key)
+    proj_dir = _get_project_dir(active_key)
+    proj_default_abs = os.path.abspath(os.path.join(proj_dir, "chroma"))
 
-    # --- Fix persist_dir for cloud/local ---
-    pd = (prefs.get("persist_dir") or "").strip()
-    if not pd:
-        prefs["persist_dir"] = proj_default
+    # --- Fix + MIGRATE persist_dir (Option B, project-scoped) ---
+    # Rules:
+    # 1) If missing -> use project default
+    # 2) If relative -> resolve under project folder
+    # 3) If points to another project's chroma (e.g. projects/default/chroma) -> migrate to current project
+    # 4) If legacy global default (APP_DIR/data/chroma) -> migrate to current project
+    pd_raw = (prefs.get("persist_dir") or "").strip()
+
+    legacy_default_abs = os.path.abspath(os.path.join(APP_DIR, "data", "chroma"))
+    other_proj_re = re.compile(r"projects[\\/](?P<k>[A-Za-z0-9_-]+)[\\/]chroma", re.IGNORECASE)
+
+    if not pd_raw:
+        prefs["persist_dir"] = proj_default_abs
     else:
-        if IS_CLOUD and not pd.startswith("/tmp/"):
-            prefs["persist_dir"] = os.path.abspath(os.path.join(_get_project_dir(active_key), pd))
+        try:
+            if os.path.isabs(pd_raw):
+                pd_abs = os.path.abspath(pd_raw)
+            else:
+                pd_abs = os.path.abspath(os.path.join(proj_dir, pd_raw))
+
+            # legacy global default -> migrate
+            if pd_abs == legacy_default_abs:
+                pd_abs = proj_default_abs
+
+            # other project chroma -> migrate
+            m = other_proj_re.search(pd_abs.replace("\\", "/"))
+            if m:
+                k_found = _normalize_project_key(m.group("k"))
+                if k_found and k_found != _normalize_project_key(active_key):
+                    pd_abs = proj_default_abs
+
+            prefs["persist_dir"] = pd_abs
+        except Exception:
+            prefs["persist_dir"] = proj_default_abs
 
     # --- Initialize session_state for all prefs keys (once only) ---
     for key, value in prefs.items():
@@ -643,7 +798,6 @@ def init_prefs_in_session():
 
     # Keep full prefs dict available in session
     st.session_state["prefs"] = prefs
-
 
 def one_line_preview(text: str, maxlen: int = 160) -> str:
     """Make text single-line, remove bullets/extra spaces, and truncate."""
@@ -762,8 +916,15 @@ def get_index_embedder_info(persist_dir: str, collection_name: str):
 
     # 2) metadata su Chroma (se salvati in fase di ingest)
     try:
-        client = get_chroma_client(persist_dir)
-        coll = client.get_collection(collection_name)
+        if _chroma_datastore_exists(persist_dir):
+            if _chroma_datastore_exists(persist_dir):
+                client = get_chroma_client(persist_dir)
+                coll = client.get_collection(collection_name)
+            else:
+                raise RuntimeError('Chroma datastore not created yet')
+
+        else:
+            raise RuntimeError('Chroma datastore not created yet')
         md = (getattr(coll, "metadata", None) or {})  # alcune versioni mettono metadata qui
         prov = _normalize_provider_label(md.get("provider"))
         model = (md.get("model") or "").strip()
@@ -1203,6 +1364,20 @@ def build_prompt(user_ticket: str, retrieved: List[Tuple[str, dict, float]]) -> 
 
 from collections import defaultdict
 
+
+def _chroma_datastore_exists(persist_dir: str) -> bool:
+    """Return True if a Chroma persistent datastore already exists in persist_dir.
+
+    IMPORTANT: This function must NOT create directories. We use it to keep Chroma lazy,
+    so that projects/default/chroma is not created on startup.
+    """
+    try:
+        p = Path(persist_dir)
+        return (p / "chroma.sqlite3").is_file()
+    except Exception:
+        return False
+
+
 def collapse_by_parent(results, per_parent=1, stitch_for_prompt=False, max_chars=1200):
     """
     Collapse multiple chunks from the same ticket into one row.
@@ -1414,12 +1589,22 @@ def render_phase_embeddings_vectordb_page(prefs):
     # -----------------------------
     st.header("Vector DB")
 
-    persist_dir = st.text_input(
+    persist_dir_input = st.text_input(
         "Chroma path",
         value=st.session_state["persist_dir"],
         key="persist_dir",
         help="Directory where Chroma will store its collections.",
     )
+
+    # Resolve project-scoped persist_dir: relative paths are anchored to the active project folder.
+    try:
+        _active_k = _get_active_project_key()
+        _proj_dir = _get_project_dir(_active_k)
+        persist_dir = _resolve_persist_dir(persist_dir_input, base_dir=_proj_dir)
+        # Keep session state aligned with the resolved absolute path (avoids creating folders under CWD).
+        st.session_state["persist_dir"] = persist_dir
+    except Exception:
+        persist_dir = persist_dir_input
 
     # Ensure directory exists
     try:
@@ -1433,9 +1618,14 @@ def render_phase_embeddings_vectordb_page(prefs):
     # -----------------------------
     coll_options: list[str] = []
     try:
-        if chromadb is not None:
-            _client = get_chroma_client(persist_dir)
-            coll_options = [c.name for c in _client.list_collections()]  # type: ignore
+        if chromadb is not None and _chroma_datastore_exists(persist_dir):
+            if _chroma_datastore_exists(persist_dir):
+                _client = get_chroma_client(persist_dir)
+                coll_options = [c.name for c in _client.list_collections()]  # type: ignore
+            else:
+                coll_options = []
+
+# type: ignore
     except Exception as e:
         st.caption(f"Unable to read collections from '{persist_dir}': {e}")
 
@@ -1539,6 +1729,8 @@ def render_phase_embeddings_vectordb_page(prefs):
             "Run **Index tickets** at least once before it can be deleted."
         )
 
+    delete_db_folder = st.checkbox("Also delete DB folder (Windows-safe)", value=False, help="After deleting the collection, also reset + remove the persist_dir folder (e.g. chroma).")
+
     if st.button(
         "Delete collection",
         type="secondary",
@@ -1550,7 +1742,30 @@ def render_phase_embeddings_vectordb_page(prefs):
         else:
             try:
                 _client = get_chroma_client(persist_dir)
+                _release_vector_db_if_open(os.path.abspath(persist_dir))
                 _client.delete_collection(name=collection_name)
+
+                # Optional: remove the whole DB folder after deleting the collection
+                if 'delete_db_folder' in locals() and delete_db_folder:
+                    try:
+                        _release_vector_db_if_open(os.path.abspath(persist_dir))
+
+                        try:
+                            import chromadb
+                            from chromadb.config import Settings as ChromaSettings
+                            client2 = chromadb.PersistentClient(
+                                path=persist_dir,
+                                settings=ChromaSettings(anonymized_telemetry=False),
+                            )
+                            client2.reset()
+                            del client2
+                        except Exception:
+                            pass
+
+                        _rmtree_with_retries(os.path.abspath(persist_dir))
+                        st.success(f"Deleted DB folder: {persist_dir}")
+                    except Exception as e:
+                        st.error(f"Could not delete DB folder (likely locked): {e}")
 
                 # Remove the collection meta (provider/model) if present
                 meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
@@ -2267,7 +2482,11 @@ def render_phase_chat_page(prefs):
         # Ensure the vector store is open on the correct collection
         vect = st.session_state.get("vector")
         if (vect is None) or (st.session_state.get("vs_collection") != collection_name):
-            ok, _, _ = open_vector_in_session(persist_dir, collection_name)
+            # Lazy Chroma: avoid creating persist_dir/chroma.sqlite3 on UI render.
+            if _chroma_datastore_exists(persist_dir):
+                ok, _, _ = open_vector_in_session(persist_dir, collection_name)
+            else:
+                ok, _, _ = False, 0, None
             if not ok:
                 st.error(
                     "Open or create a valid collection in Phase 2 (Embeddings & Vector DB)."
@@ -2809,8 +3028,8 @@ def run_streamlit_app():
     st.set_page_config(page_title="YouTrack RAG Support", layout="wide")
     inject_global_css()
 
-    init_projects_in_session()
     render_project_selector()
+    init_projects_in_session()
 
     init_prefs_in_session()
     # === Robust prefs loading & one-time bootstrap ===
@@ -3130,8 +3349,12 @@ def run_streamlit_app():
             st.caption("No index metadata available. Consider reindexing to record provider/model.")
 
         st.markdown("---")
-        st.caption(f"IS_CLOUD={IS_CLOUD} · ChromaDB dir={st.session_state['prefs'].get('persist_dir', DEFAULT_CHROMA_DIR)}")
-
+        _pd_eff = (
+            st.session_state.get("persist_dir")
+            or (st.session_state.get("prefs", {}) or {}).get("persist_dir")
+            or _default_active_persist_dir()
+        )
+        st.caption(f"IS_CLOUD={IS_CLOUD} · ChromaDB dir={_pd_eff}")
         if not IS_CLOUD:
             quit_btn = st.button("Quit", use_container_width=True)
             if quit_btn:
@@ -3181,15 +3404,26 @@ def run_streamlit_app():
                 pass  # wait for "Index tickets" to create the new collection
             else:
                 if changed:
-                    ok, cnt, err = open_vector_in_session(persist_dir, collection_name)
-                    vector_ready = ok
-                    if ok:
+                    # Lazy Chroma: do not create persist_dir on UI render.
+                    ok, cnt, err = False, 0, None  # <-- always define defaults
+
+                    if not _chroma_datastore_exists(persist_dir):
+                        vector_ready = False
                         st.caption(
-                            f"Collection '{collection_name}' opened. "
-                            f"Indexed documents: {cnt if cnt >= 0 else 'N/A'}"
+                            "Chroma datastore not created yet for this project. "
+                            "It will be created when you index tickets."
                         )
                     else:
-                        st.caption(f"Unable to open the collection: {err}")
+                        ok, cnt, err = open_vector_in_session(persist_dir, collection_name)
+                        vector_ready = ok
+
+                        if ok:
+                            st.caption(
+                                f"Collection '{collection_name}' opened. "
+                                f"Indexed documents: {cnt if cnt >= 0 else 'N/A'}"
+                            )
+                        else:
+                            st.caption(f"Unable to open the collection: {err}")
                 else:
                     vector_ready = True
                     cnt = st.session_state.get("vs_count", -1)
@@ -3237,7 +3471,8 @@ def _self_tests():
     print("Running minimal self-tests...")
     vs = None
     try:
-        vs = VectorStore(DEFAULT_CHROMA_DIR, DEFAULT_COLLECTION)
+        test_dir = _default_project_persist_dir("default")
+        vs = VectorStore(test_dir, DEFAULT_COLLECTION)
         print("VectorStore OK.")
     except Exception as e:
         print(f"VectorStore not available: {e}")

@@ -176,10 +176,16 @@ def _load_project_config(project_key: str) -> ProjectConfig:
     webhook_secret = (prefs.get("webhook_secret") or "").strip()
 
     persist_dir = (prefs.get("persist_dir") or "").strip()
+    # If persist_dir is relative (project-scoped), resolve it relative to the project prefs folder,
+    # not relative to APP_DIR. This allows project-scoped folders like:
+    #   projects/<project_key>/chroma
+    prefs_dir = os.path.dirname(prefs_path)
     if persist_dir and not os.path.isabs(persist_dir):
-        persist_dir = os.path.join(APP_DIR, persist_dir)
+        persist_dir = os.path.join(prefs_dir, persist_dir)
+
     if not persist_dir:
-        persist_dir = os.path.join(APP_DIR, "data", "chroma")
+        # Default to a project-scoped folder
+        persist_dir = os.path.join(os.path.dirname(prefs_path), "chroma")
 
     if not yt_url:
         raise RuntimeError(f"Project '{project_key}': missing 'yt_url' in {prefs_path}")
