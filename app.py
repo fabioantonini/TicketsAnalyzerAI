@@ -359,11 +359,13 @@ PHASE_COLORS = {
     "Solutions memory":         "#FFF0F3",  # light pink
     "Chat & Results":           "#E6FAFF",  # light cyan
     "Preferences & debug":      "#F6F6F6",  # neutral grey
+    "MCP Console":              "#EAFBF3",
 }
 
 # Icons for phases (used in sidebar radio)
 PHASE_ICONS = {
     "YouTrack connection":      "🔗",
+    "MCP Console":              "🛠️",
     "Embeddings & Vector DB":   "🧩",
     "Retrieval configuration":  "🔍",
     "LLM & API keys":           "🔑",
@@ -877,6 +879,139 @@ def render_phase_yt_connection_page(prefs):
 
     return yt_url, yt_token, connect
 
+
+# === MCP CONSOLE (auto-added) BEGIN ===
+def run_mcp_prompt(prompt: str, *, yt_url: str, yt_token: str, openai_key: str) -> dict:
+    """Run a prompt against YouTrack MCP server via OpenAI Responses API.
+
+    Returns a dict with keys:
+    - ok: bool
+    - readable: str
+    - raw: object (best-effort)
+    - error: str (if not ok)
+    """
+    if not prompt or not prompt.strip():
+        return {"ok": False, "readable": "", "raw": None, "error": "Empty prompt"}
+
+    if OpenAI is None:
+        return {"ok": False, "readable": "", "raw": None, "error": "openai SDK not available"}
+
+    base = (yt_url or "").rstrip("/")
+    if not base:
+        return {"ok": False, "readable": "", "raw": None, "error": "YouTrack URL missing (configure Phase 1)"}
+
+    if not yt_token:
+        return {"ok": False, "readable": "", "raw": None, "error": "YouTrack token missing (configure Phase 1)"}
+
+    if not openai_key:
+        return {"ok": False, "readable": "", "raw": None, "error": "OpenAI API key missing (configure Phase 4)"}
+
+    client = OpenAI(api_key=openai_key)
+    server_url = f"{base}/mcp"
+
+    try:
+        res = client.responses.create(
+            model="gpt-4o",
+            input=[
+                {"role": "system", "content": "You are a helpful assistant that can call YouTrack MCP tools as needed."},
+                {"role": "user", "content": prompt},
+            ],
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "youtrack",
+                    "server_url": server_url,
+                    "headers": {"Authorization": f"Bearer {yt_token}"},
+                    "require_approval": "never",
+                }
+            ],
+        )
+        readable = getattr(res, "output_text", "") or ""
+        return {"ok": True, "readable": readable, "raw": res, "error": ""}
+    except Exception as e:
+        return {"ok": False, "readable": "", "raw": None, "error": str(e)}
+
+
+def render_phase_mcp_console_page(prefs):
+    import streamlit as st  # local import
+
+    st.title("MCP Console")
+    st.write("Interact with the current YouTrack project via MCP (without changing the rest of the app).")
+
+    yt_url = st.session_state.get("yt_url", "")
+    yt_token = st.session_state.get("yt_token", "")
+    project_key = st.session_state.get("last_project_key", "")
+
+    st.markdown("---")
+    c1, c2, c3 = st.columns([2, 2, 1])
+    with c1:
+        st.caption("YouTrack URL (from Phase 1)")
+        st.code(yt_url or "—")
+    with c2:
+        st.caption("Current project (from Phase 1)")
+        st.code(project_key or "—")
+    with c3:
+        st.caption("Loaded issues")
+        issues_n = len(st.session_state.get("issues", []) or [])
+        st.code(str(issues_n))
+
+    st.markdown("---")
+
+    if "mcp_console_prompt" not in st.session_state:
+        st.session_state["mcp_console_prompt"] = ""
+
+    b1, b2, b3 = st.columns([1, 1, 2])
+    with b1:
+        if st.button("Insert current project"):
+            if project_key:
+                p = st.session_state.get("mcp_console_prompt", "")
+                prefix = f"Project: {project_key}\n"
+                if prefix not in p:
+                    st.session_state["mcp_console_prompt"] = prefix + p
+            else:
+                st.warning("No project selected in Phase 1.")
+    with b2:
+        if st.button("Test MCP"):
+            if project_key:
+                st.session_state["mcp_console_prompt"] = (
+                    f"Search 1 issue in project {project_key} and print its idReadable and summary."
+                )
+            else:
+                st.session_state["mcp_console_prompt"] = "List projects and print their shortName and name."
+    with b3:
+        st.caption("Tip: ask for 'search issues', 'get issue details', 'list projects', etc.")
+
+    prompt = st.text_area(
+        "Prompt",
+        key="mcp_console_prompt",
+        height=200,
+        placeholder="Example: Search the 10 most recent issues in the current project about 'VPN' and summarize.",
+    )
+
+    run = st.button("Run MCP prompt")
+
+    if run:
+        openai_key = get_openai_key() or ""
+        with st.spinner("Running MCP prompt..."):
+            out = run_mcp_prompt(prompt, yt_url=yt_url, yt_token=yt_token, openai_key=openai_key)
+        st.session_state["mcp_console_last"] = out
+
+    out = st.session_state.get("mcp_console_last")
+    if out:
+        tabs = st.tabs(["Readable", "Raw", "Error"])
+        with tabs[0]:
+            if out.get("ok"):
+                st.write(out.get("readable") or "")
+            else:
+                st.info("No readable output.")
+        with tabs[1]:
+            st.write(out.get("raw"))
+        with tabs[2]:
+            if not out.get("ok"):
+                st.error(out.get("error") or "Unknown error")
+            else:
+                st.caption("No error.")
+# === MCP CONSOLE (auto-added) END ===
 def render_phase_embeddings_vectordb_page(prefs):
     import streamlit as st
 
@@ -2523,6 +2658,9 @@ def run_streamlit_app():
     if phase == "YouTrack connection":
         yt_url, yt_token, connect = render_phase_yt_connection_page(prefs)
 
+    elif phase == "MCP Console":
+        render_phase_mcp_console_page(prefs)
+
     elif phase == "Embeddings & Vector DB":
         render_phase_embeddings_vectordb_page(prefs)
 
@@ -2548,6 +2686,7 @@ def run_streamlit_app():
         # --- Wizard-style navigation (visual only, all sections still visible) ---
         PHASES = [
             "YouTrack connection",
+            "MCP Console",
             "Embeddings & Vector DB",
             "Retrieval configuration",
             "LLM & API keys",
