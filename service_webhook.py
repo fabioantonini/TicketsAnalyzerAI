@@ -355,8 +355,8 @@ def issue_created(payload: IssueCreatedPayload, x_webhook_secret: Optional[str] 
     # Resolve KB collection:
     # - payload override wins
     # - otherwise use issue prefix/project key (NETKB-3 -> 'netkb')
-    if payload.kb_collection and payload.kb_collection.strip():
-        kb_name = payload.kb_collection.strip().lower()
+    if kb_collection and kb_collection.strip():
+        kb_name = kb_collection.strip().lower()
     else:
         short = _parse_project_short_name_from_readable(id_readable) or _parse_project_short_name_from_readable(issue_id) or cfg.project_key
         kb_name = (short or cfg.project_key).strip().lower()

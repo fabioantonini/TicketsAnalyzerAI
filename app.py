@@ -181,27 +181,6 @@ def _get_project_prefs_path(project_key: str) -> str:
         return os.path.join(PROJECTS_ROOT_DIR, rel)
     return rel
 
-def _clear_project_pref_session_state() -> None:
-    """Clear per-project prefs from session_state so next run reloads from the active project's file."""
-    try:
-        # Remove canonical pref keys
-        for k in PREF_KEYS:
-            st.session_state.pop(k, None)
-
-        # Remove any "prefs_*" shadow keys
-        for k in list(st.session_state.keys()):
-            if k.startswith("prefs_"):
-                st.session_state.pop(k, None)
-
-        # Remove cached dict
-        st.session_state.pop("prefs", None)
-
-        # Remove vector-db cache keys (so DB handles don't stick to previous project)
-        for k in ("vector", "vs_collection", "vs_persist_dir", "vs_count"):
-            st.session_state.pop(k, None)
-    except Exception:
-        pass
-
 def _get_projects_root_dir() -> str:
     """
     Return the projects root directory.
@@ -306,31 +285,12 @@ def delete_project(project_key: str, *, delete_project_folder: bool = True, dele
     # Delete vector db folder (Option B folder)
     if delete_vector_db:
         try:
-            # 1) Best-effort release (session + gc)
-            _release_vector_db_if_open(chroma_dir_abs)
-
-            # 2) HARD reset via a fresh Chroma client (helps Windows file locks)
-            try:
-                import chromadb
-                from chromadb.config import Settings as ChromaSettings
-                if os.path.isdir(chroma_dir_abs):
-                    client = chromadb.PersistentClient(
-                        path=chroma_dir_abs,
-                        settings=ChromaSettings(anonymized_telemetry=False),
-                    )
-                    client.reset()
-                    del client
-            except Exception:
-                # Do not block deletion if reset isn't available
-                pass
-
-            # 3) Now remove the folder
             if os.path.isdir(chroma_dir_abs):
                 _rmtree_with_retries(chroma_dir_abs)
-
             removed_vdb = True
         except Exception as e:
             errors.append(f"vector db delete failed: {e}")
+
     # Delete the whole project folder
     if delete_project_folder:
         try:
@@ -354,6 +314,9 @@ def delete_project(project_key: str, *, delete_project_folder: bool = True, dele
     if errors:
         msg += " WARN: " + " | ".join(errors)
     return msg
+
+
+
 
 def _default_active_persist_dir() -> str:
     """Per-project default persist_dir for the currently active project."""
@@ -463,14 +426,6 @@ def render_project_selector() -> None:
 
                     st.session_state["active_project"] = nk
                     _set_active_project_key(nk)
-                    # Reset project-scoped defaults and clear cached prefs for a clean switch
-                    try:
-                        st.session_state["persist_dir"] = _default_active_persist_dir()
-                    except Exception:
-                        pass
-                    _clear_project_pref_session_state()
-
-                    _clear_project_pref_session_state()
                     st.success(f"Duplicated into '{nk}'")
                     st.rerun()
 
@@ -518,7 +473,10 @@ def render_project_selector() -> None:
     if sel != active:
         st.session_state["active_project"] = sel
         _set_active_project_key(sel)
-        _clear_project_pref_session_state()
+        # Force re-init prefs on next run
+        for k in list(st.session_state.keys()):
+            if k.startswith("prefs_"):
+                st.session_state.pop(k, None)
         st.rerun()
 
     with st.sidebar.expander("Create new project", expanded=False):
@@ -552,36 +510,22 @@ def render_project_selector() -> None:
             if not os.path.exists(prefs_abs):
                 created = False
 
-                # Option 1: copy current active prefs as starting point
+                # Option 1: copy current active prefs as starting point (includes yt_token/openai_api_key)
                 try:
                     if os.path.exists(old_prefs_abs):
                         shutil.copy2(old_prefs_abs, prefs_abs)
                         created = True
-                        # Force Model A: project-scoped Vector DB path (relative)
-                        try:
-                            d = _load_json_file(prefs_abs)
-                            d["persist_dir"] = "chroma"
-                            _save_json_file(prefs_abs, d)
-                        except Exception:
-                            pass
-                        # Force Option B: project-scoped Vector DB (after copy)
-                        try:
-                            d = _load_json_file(prefs_abs)
-                            d["persist_dir"] = "chroma"
-                            _save_json_file(prefs_abs, d)
-                        except Exception:
-                            pass
                 except Exception:
                     created = False
 
-                # Option 2: template + inherit (NO persist_dir inheritance)
+                # Option 2: template + inherit from old prefs (including yt_token/openai_api_key)
                 if not created:
                     template = {
                         "yt_url": "",
                         "yt_token": "",
                         "webhook_secret": "supersecret",
                         "openai_api_key": "",
-                        "persist_dir": "chroma",
+                        "persist_dir": "",
                         "emb_backend": "OpenAI",
                         "emb_model_name": "text-embedding-3-small",
                         "max_distance": 0.9,
@@ -595,7 +539,7 @@ def render_project_selector() -> None:
                         "prefs_enabled": True
                     }
 
-                    # Inherit from current project if available (but not persist_dir)
+                    # Inherit from current project if available
                     try:
                         if os.path.exists(old_prefs_abs):
                             old = _load_json_file(old_prefs_abs)
@@ -608,25 +552,9 @@ def render_project_selector() -> None:
 
                     _save_json_file(prefs_abs, template)
 
-            # ALWAYS enforce Option B even if prefs file already existed
-            try:
-                d = _load_json_file(prefs_abs)
-                d["persist_dir"] = "chroma"
-                _save_json_file(prefs_abs, d)
-            except Exception:
-                pass
-
             # Switch active project only after prefs file exists
             st.session_state["active_project"] = nk
             _set_active_project_key(nk)
-            # Reset project-scoped defaults and clear cached prefs for a clean switch
-            try:
-                st.session_state["persist_dir"] = _default_active_persist_dir()
-            except Exception:
-                pass
-            _clear_project_pref_session_state()
-
-            _clear_project_pref_session_state()
             st.success(f"Project '{nk}' created and selected")
             st.rerun()
 
@@ -916,15 +844,8 @@ def get_index_embedder_info(persist_dir: str, collection_name: str):
 
     # 2) metadata su Chroma (se salvati in fase di ingest)
     try:
-        if _chroma_datastore_exists(persist_dir):
-            if _chroma_datastore_exists(persist_dir):
-                client = get_chroma_client(persist_dir)
-                coll = client.get_collection(collection_name)
-            else:
-                raise RuntimeError('Chroma datastore not created yet')
-
-        else:
-            raise RuntimeError('Chroma datastore not created yet')
+        client = get_chroma_client(persist_dir)
+        coll = client.get_collection(collection_name)
         md = (getattr(coll, "metadata", None) or {})  # alcune versioni mettono metadata qui
         prov = _normalize_provider_label(md.get("provider"))
         model = (md.get("model") or "").strip()
@@ -1364,20 +1285,6 @@ def build_prompt(user_ticket: str, retrieved: List[Tuple[str, dict, float]]) -> 
 
 from collections import defaultdict
 
-
-def _chroma_datastore_exists(persist_dir: str) -> bool:
-    """Return True if a Chroma persistent datastore already exists in persist_dir.
-
-    IMPORTANT: This function must NOT create directories. We use it to keep Chroma lazy,
-    so that projects/default/chroma is not created on startup.
-    """
-    try:
-        p = Path(persist_dir)
-        return (p / "chroma.sqlite3").is_file()
-    except Exception:
-        return False
-
-
 def collapse_by_parent(results, per_parent=1, stitch_for_prompt=False, max_chars=1200):
     """
     Collapse multiple chunks from the same ticket into one row.
@@ -1533,14 +1440,331 @@ def render_phase_yt_connection_page(prefs):
 
 def render_phase_embeddings_vectordb_page(prefs):
     import streamlit as st
+    import os
+    import json
 
     # -----------------------------
-    # 0) Normalize prefs and bootstrap state
+    # Option A: project-scoped persist_dir + collection
     # -----------------------------
-    if isinstance(prefs, dict):
-        prefs_dict = prefs
-    else:
-        prefs_dict = st.session_state.get("prefs", {})
+    prefs_dict = prefs if isinstance(prefs, dict) else st.session_state.get("prefs", {})
+
+    active_project = _get_active_project_key()  # e.g. "netkb"
+    collection_name = active_project            # Option A: collection == project key
+    persist_dir = os.path.abspath(_default_project_persist_dir(active_project))
+
+    # Single source of truth in session_state
+    st.session_state["persist_dir"] = persist_dir
+    st.session_state["vs_collection"] = collection_name
+
+    # -----------------------------
+    # 1) Header + success message
+    # -----------------------------
+    st.title("Phase 2 – Embeddings & Vector DB")
+    st.write(
+        "Configure the Chroma vector store (project-scoped path) and the embeddings "
+        "provider/model used for indexing and query."
+    )
+
+    msg = st.session_state.pop("_index_success", None)
+    if msg:
+        st.success(msg)
+
+    status_box = st.empty()
+    st.markdown("---")
+
+    # -----------------------------
+    # 2) Vector DB configuration (read-only)
+    # -----------------------------
+    st.header("Vector DB")
+
+    st.text_input(
+        "Chroma path",
+        value=persist_dir,
+        disabled=True,
+        help="Project-scoped. The folder will be created when you click 'Index tickets'.",
+    )
+    st.caption(f"Collection (project-scoped): {collection_name}")
+
+    # -----------------------------
+    # 3) Read existing collections lazily (NO folder creation)
+    # -----------------------------
+    coll_options: list[str] = []
+    try:
+        # chromadb may be a global set earlier; fall back safely
+        _ch = globals().get("chromadb", None)
+        if _ch is not None and _chroma_datastore_exists(persist_dir):
+            _client = get_chroma_client(persist_dir)
+            coll_options = [c.name for c in _client.list_collections()]  # type: ignore
+    except Exception as e:
+        st.caption(f"Unable to read collections from '{persist_dir}': {e}")
+
+    # -----------------------------
+    # 4) Top status summary
+    # -----------------------------
+    current_provider = (
+        st.session_state.get("emb_provider_select")
+        or prefs_dict.get("emb_backend", "OpenAI")
+    )
+    current_model = (
+        st.session_state.get("emb_model")
+        or prefs_dict.get("emb_model_name", "")
+    )
+
+    status_box.info(
+        f"Current collection: **{collection_name}** · "
+        f"Provider: **{current_provider}** · Model: **{current_model or 'n/a'}**"
+    )
+
+    # -----------------------------
+    # 5) Collection management: delete (project-scoped)
+    # -----------------------------
+    st.markdown("---")
+    st.subheader("Collection management")
+
+    is_existing_collection = collection_name in coll_options
+
+    del_confirm = st.checkbox(
+        f"Confirm deletion of '{collection_name}'",
+        value=False,
+        disabled=not is_existing_collection,
+        help="This operation permanently removes the collection from the datastore.",
+    )
+
+    also_delete_db_folder = st.checkbox(
+        "Also delete DB folder (Windows-safe)",
+        value=False,
+        help="If enabled, deletes the whole persist_dir folder after removing the collection.",
+        disabled=not is_existing_collection,
+    )
+
+    if not is_existing_collection:
+        st.caption(
+            "ℹ️ This project collection is not yet present in Chroma. "
+            "Run **Index tickets** at least once before it can be deleted."
+        )
+
+    if st.button(
+        "Delete collection",
+        type="secondary",
+        disabled=not is_existing_collection,
+        help="Permanently removes the project-scoped collection from the vector datastore.",
+    ):
+        if not del_confirm:
+            st.warning("Check the confirmation box to proceed with deletion.")
+        else:
+            try:
+                # Release any open handles first (Windows)
+                try:
+                    _release_vector_db_if_open(os.path.abspath(persist_dir))
+                except Exception:
+                    pass
+
+                _client = get_chroma_client(persist_dir)
+                _client.delete_collection(name=collection_name)
+
+                # Remove the collection meta if present
+                meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+                try:
+                    if os.path.exists(meta_path):
+                        os.remove(meta_path)
+                except Exception:
+                    pass
+
+                # Optionally delete the whole DB folder
+                if also_delete_db_folder:
+                    try:
+                        if os.path.isdir(persist_dir):
+                            _rmtree_with_retries(persist_dir)
+                    except Exception as e:
+                        st.warning(f"Deleted collection but could not delete folder: {e}")
+
+                # Reset vector state
+                st.session_state["vector"] = None
+                st.session_state["vs_count"] = 0
+                st.session_state["issues"] = []
+                st.success(f"Collection '{collection_name}' deleted successfully.")
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Error during deletion: {e}")
+
+    st.markdown("---")
+
+    # -----------------------------
+    # 6) Embeddings configuration
+    # -----------------------------
+    st.header("Embeddings")
+
+    emb_backends: list[str] = []
+    # SentenceTransformer is typically global in app.py; guard safely
+    _st_lib = globals().get("SentenceTransformer", None)
+    if _st_lib is not None and not IS_CLOUD:
+        emb_backends.append("Local (sentence-transformers)")
+    emb_backends.append("OpenAI")
+
+    pref_backend = prefs_dict.get("emb_backend") or "OpenAI"
+    if (
+        pref_backend == "Local (sentence-transformers)"
+        and "Local (sentence-transformers)" not in emb_backends
+    ):
+        pref_backend = "OpenAI"
+
+    emb_backend = st.selectbox(
+        "Embeddings provider",
+        options=emb_backends,
+        index=emb_backends.index(pref_backend),
+        key="emb_provider_select",
+    )
+
+    prev_backend = st.session_state.get("_prev_emb_backend")
+    if prev_backend is None:
+        st.session_state["_prev_emb_backend"] = emb_backend
+    elif prev_backend != emb_backend:
+        st.session_state["_prev_emb_backend"] = emb_backend
+        st.session_state["emb_model"] = (
+            "all-MiniLM-L6-v2"
+            if emb_backend == "Local (sentence-transformers)"
+            else "text-embedding-3-small"
+        )
+
+    if "emb_model" not in st.session_state:
+        st.session_state["emb_model"] = prefs_dict.get(
+            "emb_model_name",
+            "all-MiniLM-L6-v2"
+            if emb_backend == "Local (sentence-transformers)"
+            else "text-embedding-3-small",
+        )
+
+    emb_model_options = (
+        ["all-MiniLM-L6-v2"]
+        if emb_backend == "Local (sentence-transformers)"
+        else ["text-embedding-3-small", "text-embedding-3-large"]
+    )
+
+    if st.session_state["emb_model"] not in emb_model_options:
+        st.session_state["emb_model"] = emb_model_options[0]
+
+    emb_model_name = st.selectbox(
+        "Embeddings model",
+        options=emb_model_options,
+        index=emb_model_options.index(st.session_state["emb_model"]),
+        key="emb_model",
+    )
+
+    # -----------------------------
+    # 7) Vector DB indexing (folder created ONLY here)
+    # -----------------------------
+    st.subheader("Vector DB Indexing")
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        start_ingest = st.button("Index tickets")
+    with col2:
+        st.caption("Create ticket embeddings and save them to Chroma for semantic retrieval")
+
+    enable_chunking = bool(st.session_state.get("enable_chunking", True))
+    chunk_size = int(st.session_state.get("chunk_size", 800))
+    chunk_overlap = int(st.session_state.get("chunk_overlap", 80))
+    chunk_min = int(st.session_state.get("chunk_min", 512))
+
+    if start_ingest:
+        issues = st.session_state.get("issues", [])
+        if not issues:
+            st.error("First load the project's tickets")
+        else:
+            try:
+                # Create folder lazily here (NOT during render)
+                os.makedirs(persist_dir, exist_ok=True)
+
+                st.session_state["vector"] = VectorStore(
+                    persist_dir=persist_dir, collection_name=collection_name
+                )
+                use_openai_embeddings = (emb_backend == "OpenAI")
+                st.session_state["embedder"] = EmbeddingBackend(
+                    use_openai=use_openai_embeddings, model_name=emb_model_name
+                )
+
+                # Save embeddings model metadata for consistency
+                try:
+                    meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
+                    meta = {
+                        "provider": st.session_state["embedder"].provider_name,
+                        "model": st.session_state["embedder"].model_name,
+                    }
+                    with open(meta_path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f)
+                except Exception:
+                    pass
+
+                all_ids = []
+                all_docs = []
+                all_metas = []
+                embed_inputs = []
+
+                for it in issues:
+                    full_text = it.text_blob()
+                    if enable_chunking:
+                        pieces = split_into_chunks(
+                            full_text,
+                            chunk_size=int(chunk_size),
+                            overlap=int(chunk_overlap),
+                            min_size=int(chunk_min),
+                        )
+                    else:
+                        pieces = [(0, full_text)]
+
+                    if not pieces:
+                        pieces = [(0, full_text)]
+
+                    multi = len(pieces) > 1
+
+                    for idx, (pos0, chunk_text) in enumerate(pieces, start=1):
+                        cid = f"{it.id_readable}::c{idx:03d}" if multi else it.id_readable
+                        all_ids.append(cid)
+                        all_docs.append(chunk_text)
+
+                        meta = {
+                            "parent_id": it.id_readable,
+                            "id_readable": it.id_readable,
+                            "summary": it.summary,
+                            "project": it.project,
+                        }
+                        if multi:
+                            meta["chunk_id"] = idx
+                            meta["pos"] = int(pos0)
+
+                        all_metas.append({k: v for k, v in meta.items() if v is not None})
+                        embed_inputs.append(f"{it.id_readable} | {it.summary}\n\n{chunk_text}")
+
+                with st.spinner(
+                    f"Computing embeddings for {len(all_ids)} "
+                    f"{'chunks' if enable_chunking else 'documents'} "
+                    "and saving to Chroma..."
+                ):
+                    embs = st.session_state["embedder"].embed(embed_inputs)
+                    st.session_state["vector"].add(
+                        ids=all_ids,
+                        documents=all_docs,
+                        metadatas=all_metas,
+                        embeddings=embs,
+                    )
+
+                st.session_state["vs_persist_dir"] = persist_dir
+                st.session_state["vs_collection"] = collection_name
+                st.session_state["vs_count"] = st.session_state["vector"].count()
+
+                st.session_state["_index_success"] = (
+                    f"Indexing completed. Total "
+                    f"{'chunks' if enable_chunking else 'documents'}: "
+                    f"{st.session_state['vs_count']}"
+                )
+
+                st.session_state["ui_phase_choice"] = "Embeddings & Vector DB"
+                st.rerun()
+
+            except Exception as e:
+                st.error(f"Indexing error: {e}")
+
 
     def init_state(key: str, default):
         """Initialize a session_state key once, if not already set."""
@@ -1550,21 +1774,9 @@ def render_phase_embeddings_vectordb_page(prefs):
     # Persist dir
     init_state("persist_dir", prefs_dict.get("persist_dir", _default_active_persist_dir()))
 
-    # Collections (semantic: collection_selected + vs_collection = actual name)
-    init_state(
-        "collection_selected",
-        (prefs_dict.get("collection_selected") or "").strip() or None,
-    )
-    init_state(
-        "vs_collection",
-        (prefs_dict.get("collection_selected") or "").strip()
-        or prefs_dict.get("new_collection_name")
-        or None,
-    )
-    init_state(
-        "new_collection_name_input",
-        prefs_dict.get("new_collection_name", DEFAULT_COLLECTION),
-    )
+    # Collection is project-scoped: use the active project key.
+    init_state("vs_collection", _get_active_project_key())
+
 
     # -----------------------------
     # 1) Header + success message
@@ -1589,22 +1801,12 @@ def render_phase_embeddings_vectordb_page(prefs):
     # -----------------------------
     st.header("Vector DB")
 
-    persist_dir_input = st.text_input(
+    persist_dir = st.text_input(
         "Chroma path",
         value=st.session_state["persist_dir"],
         key="persist_dir",
         help="Directory where Chroma will store its collections.",
     )
-
-    # Resolve project-scoped persist_dir: relative paths are anchored to the active project folder.
-    try:
-        _active_k = _get_active_project_key()
-        _proj_dir = _get_project_dir(_active_k)
-        persist_dir = _resolve_persist_dir(persist_dir_input, base_dir=_proj_dir)
-        # Keep session state aligned with the resolved absolute path (avoids creating folders under CWD).
-        st.session_state["persist_dir"] = persist_dir
-    except Exception:
-        persist_dir = persist_dir_input
 
     # Ensure directory exists
     try:
@@ -1618,14 +1820,9 @@ def render_phase_embeddings_vectordb_page(prefs):
     # -----------------------------
     coll_options: list[str] = []
     try:
-        if chromadb is not None and _chroma_datastore_exists(persist_dir):
-            if _chroma_datastore_exists(persist_dir):
-                _client = get_chroma_client(persist_dir)
-                coll_options = [c.name for c in _client.list_collections()]  # type: ignore
-            else:
-                coll_options = []
-
-# type: ignore
+        if chromadb is not None:
+            _client = get_chroma_client(persist_dir)
+            coll_options = [c.name for c in _client.list_collections()]  # type: ignore
     except Exception as e:
         st.caption(f"Unable to read collections from '{persist_dir}': {e}")
 
@@ -1729,8 +1926,6 @@ def render_phase_embeddings_vectordb_page(prefs):
             "Run **Index tickets** at least once before it can be deleted."
         )
 
-    delete_db_folder = st.checkbox("Also delete DB folder (Windows-safe)", value=False, help="After deleting the collection, also reset + remove the persist_dir folder (e.g. chroma).")
-
     if st.button(
         "Delete collection",
         type="secondary",
@@ -1744,29 +1939,6 @@ def render_phase_embeddings_vectordb_page(prefs):
                 _client = get_chroma_client(persist_dir)
                 _release_vector_db_if_open(os.path.abspath(persist_dir))
                 _client.delete_collection(name=collection_name)
-
-                # Optional: remove the whole DB folder after deleting the collection
-                if 'delete_db_folder' in locals() and delete_db_folder:
-                    try:
-                        _release_vector_db_if_open(os.path.abspath(persist_dir))
-
-                        try:
-                            import chromadb
-                            from chromadb.config import Settings as ChromaSettings
-                            client2 = chromadb.PersistentClient(
-                                path=persist_dir,
-                                settings=ChromaSettings(anonymized_telemetry=False),
-                            )
-                            client2.reset()
-                            del client2
-                        except Exception:
-                            pass
-
-                        _rmtree_with_retries(os.path.abspath(persist_dir))
-                        st.success(f"Deleted DB folder: {persist_dir}")
-                    except Exception as e:
-                        st.error(f"Could not delete DB folder (likely locked): {e}")
-
                 # Remove the collection meta (provider/model) if present
                 meta_path = os.path.join(persist_dir, f"{collection_name}__meta.json")
                 try:
@@ -2482,11 +2654,7 @@ def render_phase_chat_page(prefs):
         # Ensure the vector store is open on the correct collection
         vect = st.session_state.get("vector")
         if (vect is None) or (st.session_state.get("vs_collection") != collection_name):
-            # Lazy Chroma: avoid creating persist_dir/chroma.sqlite3 on UI render.
-            if _chroma_datastore_exists(persist_dir):
-                ok, _, _ = open_vector_in_session(persist_dir, collection_name)
-            else:
-                ok, _, _ = False, 0, None
+            ok, _, _ = open_vector_in_session(persist_dir, collection_name)
             if not ok:
                 st.error(
                     "Open or create a valid collection in Phase 2 (Embeddings & Vector DB)."
@@ -3286,15 +3454,18 @@ def run_streamlit_app():
 
         # Row 1: core retrieval knobs
         c1, c2, c3 = st.columns(3)
-        with c1: st.caption("Top-K"); st.write(_top_k)
-        with c2: st.caption("Max distance"); st.write(f"{_maxdist:.2f}")
-        with c3: st.caption("Collapse duplicates"); st.write(_yes(_collapse))
+        _emb_backend = (
+            st.session_state.get("emb_backend")
+            or st.session_state.get("emb_provider_select")
+            or st.session_state.get("prefs", {}).get("emb_backend", "OpenAI")
+        )
+        _emb_model = (
+            st.session_state.get("emb_model_name")
+            or st.session_state.get("emb_model")
+            or st.session_state.get("prefs", {}).get("emb_model_name", "text-embedding-3-small")
+        )
 
-        # Row 2: per-ticket aggregation
-        c4, c5, c6 = st.columns(3)
-        with c4: st.caption("Per ticket (UI)"); st.write(_pp_ui)
-        with c5: st.caption("Per ticket (prompt)"); st.write(_pp_pr)
-        with c6: st.caption("Stitch limit (chars)"); st.write(_stitch)
+        _collection = st.session_state.get("vs_collection") or _get_active_project_key() or "—"
 
         # Row 3: chunking
         c7, c8, c9, c10 = st.columns(4)
@@ -3317,22 +3488,48 @@ def run_streamlit_app():
 
         _persist_dir = st.session_state.get("persist_dir") or st.session_state.get("prefs", {}).get("persist_dir", "")
 
-        # Embedder scelto per la QUERY (UI corrente)
-        qry_provider = st.session_state.get("emb_provider_select") or st.session_state.get("prefs", {}).get("emb_backend", "OpenAI")
-        qry_model    = st.session_state.get("emb_model") or st.session_state.get("prefs", {}).get("emb_model_name", "text-embedding-3-small")
+        # --- Embedding status (indexed vs query) ---
+        _persist_dir = st.session_state.get("persist_dir") or st.session_state.get("prefs", {}).get("persist_dir", "")
 
-        # Embedder con cui la COLLECTION è stata indicizzata (se noto)
-        idx_provider, idx_model, idx_src = (None, None, None)
-        if _collection and _persist_dir:
-            idx_provider, idx_model, idx_src = get_index_embedder_info(_persist_dir, _collection)
-
-        st.markdown("---")
-        st.header("Embedding status")
-
+        # Embedder used for the current QUERY (current UI settings)
+        qry_provider = (
+            st.session_state.get("emb_backend")
+            or st.session_state.get("emb_provider_select")
+            or st.session_state.get("prefs", {}).get("emb_backend", "OpenAI")
+        )
+        qry_model = (
+            st.session_state.get("emb_model_name")
+            or st.session_state.get("emb_model")
+            or st.session_state.get("prefs", {}).get("emb_model_name", "text-embedding-3-small")
+        )
         def _fmt(v): return v if v else "—"
 
         colA, colB = st.columns(2)
         with colA:
+            # --- Indexed embeddings metadata (read from __meta.json if present) ---
+            idx_provider, idx_model, idx_src = None, None, None
+            try:
+                _active_proj = st.session_state.get("active_project") or _get_active_project_key() or "default"
+                _coll = st.session_state.get("vs_collection") or get_project_collection_name(_active_proj)
+
+                _persist_dir = st.session_state.get("persist_dir") or st.session_state.get("prefs", {}).get("persist_dir", "")
+                _meta_path = os.path.join(_persist_dir, f"{_coll}__meta.json")
+
+                if os.path.isfile(_meta_path):
+                    with open(_meta_path, "r", encoding="utf-8") as f:
+                        _meta = json.load(f) or {}
+                    idx_provider = _meta.get("provider")
+                    idx_model = _meta.get("model")
+                    idx_src = os.path.basename(_meta_path)
+            except Exception:
+                pass
+
+            # Fallbacks if meta is missing
+            if not idx_provider:
+                idx_provider = st.session_state.get("emb_backend") or st.session_state.get("emb_provider_select") or st.session_state.get("prefs", {}).get("emb_backend", "OpenAI")
+            if not idx_model:
+                idx_model = st.session_state.get("emb_model_name") or st.session_state.get("emb_model") or st.session_state.get("prefs", {}).get("emb_model_name", "text-embedding-3-small")
+                
             st.caption("Indexed with")
             st.write(f"{_fmt(idx_provider)} · {_fmt(idx_model)}" + (f" ({idx_src})" if idx_src else ""))
 
@@ -3404,26 +3601,15 @@ def run_streamlit_app():
                 pass  # wait for "Index tickets" to create the new collection
             else:
                 if changed:
-                    # Lazy Chroma: do not create persist_dir on UI render.
-                    ok, cnt, err = False, 0, None  # <-- always define defaults
-
-                    if not _chroma_datastore_exists(persist_dir):
-                        vector_ready = False
+                    ok, cnt, err = open_vector_in_session(persist_dir, collection_name)
+                    vector_ready = ok
+                    if ok:
                         st.caption(
-                            "Chroma datastore not created yet for this project. "
-                            "It will be created when you index tickets."
+                            f"Collection '{collection_name}' opened. "
+                            f"Indexed documents: {cnt if cnt >= 0 else 'N/A'}"
                         )
                     else:
-                        ok, cnt, err = open_vector_in_session(persist_dir, collection_name)
-                        vector_ready = ok
-
-                        if ok:
-                            st.caption(
-                                f"Collection '{collection_name}' opened. "
-                                f"Indexed documents: {cnt if cnt >= 0 else 'N/A'}"
-                            )
-                        else:
-                            st.caption(f"Unable to open the collection: {err}")
+                        st.caption(f"Unable to open the collection: {err}")
                 else:
                     vector_ready = True
                     cnt = st.session_state.get("vs_count", -1)
