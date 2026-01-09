@@ -77,12 +77,18 @@ This is a **Streamlit-based RAG (Retrieval-Augmented Generation) system** organi
 - OpenAI: tries Responses API, falls back to Chat Completions
 - Ollama: HTTP REST via `/api/chat` with robust JSON parsing
 
-**MCP Console** (lines 882-1015):
+**MCP Console** (lines 882-1125):
 - Direct interaction with YouTrack via Model Context Protocol (MCP)
 - Uses OpenAI Responses API with MCP tool integration
 - Independent from RAG workflow - operates directly on YouTrack without vector DB
 - Key function: `run_mcp_prompt(prompt, yt_url, yt_token, openai_key)` returns `{ok, readable, raw, error}`
-- UI features: project context insertion, test prompts, tabbed results (Readable/Raw/Error)
+- **MCP_PROMPT_LIBRARY** (lines 379-440): 20+ preset prompts in 7 categories for common project management queries
+- UI features:
+  - One-click preset prompts with category selector
+  - Auto-run toggle for immediate execution
+  - Project context injection via {{PROJECT}} placeholder
+  - Manual prompt entry with test buttons
+  - Tabbed results (Readable/Raw/Error)
 
 ### Key Technical Patterns
 
@@ -229,9 +235,22 @@ The MCP Console provides direct programmatic access to YouTrack without requirin
 - **Administrative queries**: Get project metadata, issue counts, custom field values
 - **Testing connectivity**: Verify YouTrack API and MCP server functionality
 - **Ad-hoc operations**: One-off queries that don't justify full RAG setup
+- **Project management insights**: Use preset prompts for status, risks, trends, planning
+
+**Preset Prompt Library:**
+The `MCP_PROMPT_LIBRARY` contains 20+ curated prompts organized in 7 categories:
+1. **Quick status**: Project snapshots, recent updates, resolved issues
+2. **Backlog & workload**: State counts, assignee workload, unassigned issues
+3. **Aging & stuck**: Old issues, stuck items, stale updates
+4. **Critical & risks**: Blockers, risk summaries, SLA risks
+5. **Workflow health**: State distribution, regressions, bottlenecks
+6. **Trends**: Creation/resolution rates, lead time estimates
+7. **Planning**: Sprint candidates, carry-over risks, meeting reports
+
+Each preset uses `{{PROJECT}}` placeholder which is automatically replaced with the current project key from Phase 1.
 
 **How it works:**
-1. User writes natural language prompt (e.g., "Search 10 recent issues about VPN")
+1. User selects a category and clicks a preset button OR writes a custom prompt
 2. `run_mcp_prompt()` calls OpenAI Responses API with MCP tool configuration
 3. OpenAI model decides when to call YouTrack MCP server tools
 4. MCP server executes YouTrack API calls with Bearer token authentication
@@ -283,8 +302,11 @@ To persist new settings:
 2. Phase 1: Connect with YouTrack URL + Bearer token
 3. Phase 2 (MCP Console):
    - Click "Test MCP" button to verify connectivity
+   - Try preset prompts: Select "Quick status" category and click "Project snapshot"
+   - Enable "Auto-run on click" and try another preset
    - Try custom prompt: "Search the 5 most recent issues in the current project"
    - Verify tabbed results (Readable/Raw/Error) display correctly
+   - Verify {{PROJECT}} placeholder is replaced with current project key
 4. Phase 3: Select/create collection, index issues
 5. Phase 4: Tune distance threshold (try 0.7-1.0 range)
 6. Phase 5: Configure LLM (OpenAI requires API key for RAG and MCP)

@@ -51,7 +51,16 @@ The MCP Console provides direct programmatic access to YouTrack through the Mode
 #### Features
 
 - **Direct YouTrack interaction**: Execute operations on YouTrack via natural language prompts
+- **One-click prompt library**: 20+ preset prompts organized in 7 categories:
+  - Quick status (project snapshots, recent updates)
+  - Backlog & workload (state counts, assignee workload)
+  - Aging & stuck (old issues, stale updates)
+  - Critical & risks (blockers, SLA risks)
+  - Workflow health (bottlenecks, regressions)
+  - Trends (creation/resolution rates, lead time)
+  - Planning (sprint candidates, meeting reports)
 - **Project context**: Automatically insert the current project context from Phase 1
+- **Auto-run toggle**: Execute preset prompts immediately on click
 - **Test prompts**: Quick-start button to test MCP connectivity
 - **Tabbed results**: View responses in three tabs:
   - **Readable**: Human-friendly formatted output
@@ -61,13 +70,19 @@ The MCP Console provides direct programmatic access to YouTrack through the Mode
 #### How to use
 
 1. **Connect to YouTrack** in Phase 1 (URL + Bearer token required)
-2. **Configure OpenAI API key** in Phase 4 (MCP requires OpenAI)
+2. **Configure OpenAI API key** in Phase 5 (MCP requires OpenAI)
 3. **Navigate to MCP Console** (Phase 2)
-4. **Write a natural language prompt**, such as:
-   - "Search the 10 most recent issues in the current project about 'VPN'"
-   - "Get details for issue NETS-123"
-   - "List all projects and their short names"
-5. **Click "Run MCP prompt"** to execute
+4. **Option A - Use preset prompts:**
+   - Select a category from the dropdown (e.g., "Quick status", "Critical & risks")
+   - Click any preset button to load the prompt
+   - Enable "Auto-run on click" to execute immediately
+   - Presets automatically inject the current project key
+5. **Option B - Write custom prompts:**
+   - Write a natural language prompt, such as:
+     - "Search the 10 most recent issues in the current project about 'VPN'"
+     - "Get details for issue NETS-123"
+     - "List all projects and their short names"
+   - Click "Run MCP prompt" to execute
 
 #### Use cases
 
