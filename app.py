@@ -374,6 +374,71 @@ PHASE_ICONS = {
     "Preferences & debug":      "⚙️",
 }
 
+
+# ------------------------------
+# MCP_PROMPT_LIBRARY (one-click)
+# ------------------------------
+# Templates may contain:
+# - {{PROJECT}}: replaced with the current project key (from Phase 1)
+# Keep prompts short and tool-oriented for best MCP behavior.
+MCP_PROMPT_LIBRARY = [
+    {
+        "category": "Quick status",
+        "items": [
+            ("Project snapshot", "Give a concise snapshot of project {{PROJECT}}: open issues, blockers, critical issues, and last updates."),
+            ("Updated last 24h", "List issues in project {{PROJECT}} updated in the last 24 hours. Return idReadable, summary, state, assignee."),
+            ("Resolved last 7d", "List issues resolved in project {{PROJECT}} in the last 7 days. Return idReadable, summary, resolution date."),
+        ],
+    },
+    {
+        "category": "Backlog & workload",
+        "items": [
+            ("State counts", "Group open issues in project {{PROJECT}} by State and provide counts."),
+            ("Workload per assignee", "Group open issues in project {{PROJECT}} by assignee and show counts."),
+            ("Unassigned", "Find unassigned open issues in project {{PROJECT}}. Return idReadable, summary, priority."),
+        ],
+    },
+    {
+        "category": "Aging & stuck",
+        "items": [
+            ("Open > 30 days", "Find issues in project {{PROJECT}} open for more than 30 days. Sort by age descending."),
+            ("Stuck In Progress > 14d", "Find issues in project {{PROJECT}} stuck in 'In Progress' for more than 14 days."),
+            ("Not updated > 21d", "Find open issues in project {{PROJECT}} not updated in the last 21 days."),
+        ],
+    },
+    {
+        "category": "Critical & risks",
+        "items": [
+            ("Critical / Blockers", "List Critical or Blocker issues in project {{PROJECT}}. Include idReadable, summary, state, assignee."),
+            ("Risk summary", "Based on current open issues in project {{PROJECT}}, summarize the main technical and delivery risks."),
+            ("SLA risk (heuristic)", "Identify issues in project {{PROJECT}} likely to miss SLA based on age, priority and state."),
+        ],
+    },
+    {
+        "category": "Workflow health",
+        "items": [
+            ("State distribution", "Show how many issues in project {{PROJECT}} are in each workflow state."),
+            ("Workflow regressions", "Find issues in project {{PROJECT}} that moved backwards in workflow (e.g. Review -> In Progress)."),
+            ("Bottlenecks", "Analyze workflow states in project {{PROJECT}} and identify bottlenecks."),
+        ],
+    },
+    {
+        "category": "Trends",
+        "items": [
+            ("Created per week", "How many issues were created per week in project {{PROJECT}} in the last 2 months?"),
+            ("Resolved per week", "How many issues were resolved per week in project {{PROJECT}} in the last month?"),
+            ("Lead time estimate", "Estimate average time from creation to resolution for issues in project {{PROJECT}}."),
+        ],
+    },
+    {
+        "category": "Planning",
+        "items": [
+            ("Next sprint candidates", "Suggest a prioritized list of issues for the next sprint in project {{PROJECT}}. Explain the reasoning."),
+            ("Carry-over risks", "Which issues in project {{PROJECT}} are most likely to spill into the next sprint?"),
+            ("Meeting report", "Generate a short status report for a project meeting about {{PROJECT}}: progress, blockers, risks, next actions."),
+        ],
+    },
+]
 def inject_global_css():
     """Inject a small global CSS theme for a more modern look."""
     import streamlit as st
@@ -980,6 +1045,79 @@ def render_phase_mcp_console_page(prefs):
                 st.session_state["mcp_console_prompt"] = "List projects and print their shortName and name."
     with b3:
         st.caption("Tip: ask for 'search issues', 'get issue details', 'list projects', etc.")
+
+    # -----------------------------
+    # One-click prompt library
+    # -----------------------------
+    st.markdown("#### One-click prompts")
+
+    # Auto-run toggle (optional)
+    if "mcp_autorun_on_click" not in st.session_state:
+        st.session_state["mcp_autorun_on_click"] = False
+
+    copt1, copt2 = st.columns([1, 3])
+    with copt1:
+        st.session_state["mcp_autorun_on_click"] = st.checkbox(
+            "Auto-run on click",
+            value=bool(st.session_state["mcp_autorun_on_click"]),
+            help="If enabled, clicking a preset will immediately run it via MCP.",
+        )
+    with copt2:
+        st.caption("Presets automatically inject the current project key when needed.")
+
+    # Category select
+    categories = [c.get("category") for c in MCP_PROMPT_LIBRARY]
+    if "mcp_prompt_category" not in st.session_state:
+        st.session_state["mcp_prompt_category"] = categories[0] if categories else ""
+
+    cat = st.selectbox(
+        "Preset category",
+        options=categories,
+        key="mcp_prompt_category",
+    )
+
+    # Resolve items for the selected category
+    items = []
+    for c in MCP_PROMPT_LIBRARY:
+        if c.get("category") == cat:
+            items = c.get("items", [])
+            break
+
+    # Render buttons in a grid
+    # Each item is (label, template)
+    if items:
+        cols_per_row = 3
+        for i in range(0, len(items), cols_per_row):
+            row = st.columns(cols_per_row)
+            for j in range(cols_per_row):
+                k = i + j
+                if k >= len(items):
+                    continue
+                label, template = items[k]
+                with row[j]:
+                    if st.button(label, key=f"mcp_preset_btn_{cat}_{k}"):
+                        # Inject current project if present
+                        proj = project_key or ""
+                        text = template.replace("{{PROJECT}}", proj if proj else "{{PROJECT}}")
+
+                        # If project placeholder still exists, prepend a hint
+                        if "{{PROJECT}}" in text:
+                            st.warning("No project selected in Phase 1. Select a project to fully use this preset.")
+                        st.session_state["mcp_console_prompt"] = text
+
+                        # Optionally auto-run
+                        if bool(st.session_state.get("mcp_autorun_on_click")):
+                            openai_key = get_openai_key() or ""
+                            with st.spinner("Running MCP preset..."):
+                                out = run_mcp_prompt(
+                                    st.session_state["mcp_console_prompt"],
+                                    yt_url=yt_url,
+                                    yt_token=yt_token,
+                                    openai_key=openai_key,
+                                )
+                            st.session_state["mcp_console_last"] = out
+
+    st.markdown("---")
 
     prompt = st.text_area(
         "Prompt",
