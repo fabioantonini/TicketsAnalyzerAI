@@ -359,7 +359,7 @@ PHASE_COLORS = {
     "Solutions memory":         "#FFF0F3",  # light pink
     "Chat & Results":           "#E6FAFF",  # light cyan
     "Preferences & debug":      "#F6F6F6",  # neutral grey
-    "MCP Console":              "#EAFBF3",
+    "MCP Console":              "#1D0B82",  # dark blue
 }
 
 # Icons for phases (used in sidebar radio)
@@ -969,7 +969,7 @@ def run_mcp_prompt(prompt: str, *, yt_url: str, yt_token: str, openai_key: str) 
         return {"ok": False, "readable": "", "raw": None, "error": "YouTrack token missing (configure Phase 1)"}
 
     if not openai_key:
-        return {"ok": False, "readable": "", "raw": None, "error": "OpenAI API key missing (configure Phase 4)"}
+        return {"ok": False, "readable": "", "raw": None, "error": "OpenAI API key missing (configure Phase 5)"}
 
     client = OpenAI(api_key=openai_key)
     server_url = f"{base}/mcp"
@@ -1000,7 +1000,7 @@ def run_mcp_prompt(prompt: str, *, yt_url: str, yt_token: str, openai_key: str) 
 def render_phase_mcp_console_page(prefs):
     import streamlit as st  # local import
 
-    st.title("MCP Console")
+    st.title("Phase 2 - MCP Console")
     st.write("Interact with the current YouTrack project via MCP (without changing the rest of the app).")
 
     yt_url = st.session_state.get("yt_url", "")
@@ -1188,7 +1188,7 @@ def render_phase_embeddings_vectordb_page(prefs):
     # -----------------------------
     # 1) Header + success message
     # -----------------------------
-    st.title("Phase 2 – Embeddings & Vector DB")
+    st.title("Phase 3 – Embeddings & Vector DB")
     st.write(
         "Configure the Chroma vector store (path and collections) and the embeddings "
         "provider/model used for indexing and query."
@@ -1581,7 +1581,7 @@ def render_phase_embeddings_vectordb_page(prefs):
                     f"{st.session_state['vs_count']}"
                 )
 
-                # Stay in Phase 2 after rerun
+                # Stay in Phase 3 after rerun
                 st.session_state["ui_phase_choice"] = "Embeddings & Vector DB"
 
                 # Force rerun so the status summary and sidebar reflect the updated info
@@ -1624,7 +1624,7 @@ def render_phase_retrieval_page(prefs):
         st.session_state["_adv_reset_toast"] = True
 
     # 3) One-time bootstrap from prefs for missing keys
-    #    (same pattern as Phase 6 – Solutions memory)
+    #    (same pattern as Phase 7 – Solutions memory)
     def init_state(key: str, default):
         """Initialize a session_state key once, if not already set."""
         if key not in st.session_state:
@@ -1638,7 +1638,7 @@ def render_phase_retrieval_page(prefs):
     init_state("chunk_min", int(prefs_dict.get("chunk_min", 512)))
 
     # Canonical prefs are key names without adv_ (show_distances, top_k, …)
-    # Widgets use adv_* (consistent with Phase 7 – Preferences & debug)
+    # Widgets use adv_* (consistent with Phase 8 – Preferences & debug)
     init_state("adv_show_distances", bool(prefs_dict.get("show_distances", False)))
     init_state("adv_top_k", int(prefs_dict.get("top_k", 5)))
     init_state(
@@ -1650,7 +1650,7 @@ def render_phase_retrieval_page(prefs):
     init_state("adv_stitch_max_chars", int(prefs_dict.get("stitch_max_chars", 1500)))
 
     # 4) Main UI
-    st.title("Phase 3 – Retrieval configuration")
+    st.title("Phase 4 – Retrieval configuration")
     st.write(
         "Configure the distance threshold and chunking parameters used to retrieve "
         "similar tickets from the vector store."
@@ -1715,7 +1715,7 @@ def render_phase_retrieval_page(prefs):
         st.session_state["chunk_min"] = int(chunk_min)
 
     st.info(
-        "These settings are used when you run indexing (Phase 2) and when the retriever "
+        "These settings are used when you run indexing (Phase 3) and when the retriever "
         "filters similar tickets (Phase 6)."
     )
 
@@ -1808,7 +1808,7 @@ def render_phase_retrieval_page(prefs):
         st.session_state.get("adv_stitch_max_chars", 1500)
     )
 
-    # 7) Update prefs in memory (Phase 7 handles writing to disk)
+    # 7) Update prefs in memory (Phase 8 handles writing to disk)
     prefs_dict.update(
         {
             "max_distance": float(st.session_state["max_distance"]),
@@ -1835,7 +1835,7 @@ def render_phase_llm_page(prefs):
     else:
         prefs_dict = st.session_state.get("prefs", {})
 
-    st.title("Phase 4 – LLM & API keys")
+    st.title("Phase 5 – LLM & API keys")
     st.write(
         "Configure the LLM provider, model, temperature and API keys used to answer "
         "questions based on the retrieved tickets."
@@ -2027,7 +2027,7 @@ def render_phase_chat_page(prefs):
     # -----------------------------
     # 4) UI
     # -----------------------------
-    st.title("Phase 5 – Chat & Results")
+    st.title("Phase 6 – Chat & Results")
     st.write(
         "Ask questions about your YouTrack tickets. The app retrieves similar tickets "
         "from the vector store, sends them to the LLM, and shows the answer together "
@@ -2064,7 +2064,7 @@ def render_phase_chat_page(prefs):
             ok, _, _ = open_vector_in_session(persist_dir, collection_name)
             if not ok:
                 st.error(
-                    "Open or create a valid collection in Phase 2 (Embeddings & Vector DB)."
+                    "Open or create a valid collection in Phase 3 (Embeddings & Vector DB)."
                 )
                 return
 
@@ -2415,7 +2415,7 @@ def render_phase_solutions_memory_page(prefs):
     if "show_memories" not in st.session_state:
         st.session_state["show_memories"] = bool(prefs_dict.get("show_memories", False))
 
-    st.title("Phase 6 – Solutions memory")
+    st.title("Phase 7 – Solutions memory")
     st.write(
         "Review and manage saved playbooks (memories) derived from solved tickets."
     )
@@ -2552,7 +2552,7 @@ def render_phase_solutions_memory_page(prefs):
             st.error(f"Error reading memories: {e}")
 
 def render_phase_preferences_debug_page(prefs):
-    st.title("Phase 7 – Preferences & debug")
+    st.title("Phase 8 – Preferences & debug")
     st.write(
         "Preferences handling and Debug settings"
     )
