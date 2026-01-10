@@ -1136,8 +1136,28 @@ def render_phase_mcp_console_page(prefs):
     with copt2:
         st.caption("Presets automatically inject the current project key when needed.")
 
-    # Category select
-    categories = [c.get("category") for c in MCP_PROMPT_LIBRARY]
+    # Category select (JSON-backed)
+    # Load presets from mcp_prompts.json (editable) and fallback to embedded library if needed.
+    default_json_path = os.path.join(APP_DIR, "mcp_prompts.json")
+    lib = get_mcp_prompts_library(default_json_path=default_json_path)
+
+    # Optional: allow quick reload without restarting Streamlit
+    c_reload1, c_reload2 = st.columns([1, 4])
+    with c_reload1:
+        if st.button("Reload presets", key="mcp_reload_presets"):
+            # Drop cached library so next call reloads from disk
+            st.session_state.pop("mcp_prompt_library", None)
+            st.session_state.pop("mcp_prompt_library_path", None)
+            lib = get_mcp_prompts_library(default_json_path=default_json_path)
+            st.toast("MCP presets reloaded", icon="🔄")
+    with c_reload2:
+        st.caption(f"Presets path: {os.environ.get('MCP_PROMPTS_PATH', default_json_path)}")
+
+    # Fallback to embedded presets if JSON is missing/empty
+    if not lib:
+        lib = MCP_PROMPT_LIBRARY
+
+    categories = [c.get("category") for c in lib]
     if "mcp_prompt_category" not in st.session_state:
         st.session_state["mcp_prompt_category"] = categories[0] if categories else ""
 
@@ -1149,7 +1169,7 @@ def render_phase_mcp_console_page(prefs):
 
     # Resolve items for the selected category
     items = []
-    for c in MCP_PROMPT_LIBRARY:
+    for c in lib:
         if c.get("category") == cat:
             items = c.get("items", [])
             break
