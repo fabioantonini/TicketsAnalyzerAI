@@ -44,15 +44,16 @@ pip install -r requirements-local.txt
 
 ### Application Structure
 
-This is a **Streamlit-based RAG (Retrieval-Augmented Generation) system** organized as a 7-phase wizard:
+This is a **Streamlit-based RAG (Retrieval-Augmented Generation) system** organized as an 8-phase wizard:
 
-1. **YouTrack Connection** (lines 760-850): Connects to YouTrack API, loads projects/issues
-2. **Embeddings & Vector DB** (lines 852-1290): Configures Chroma collections, indexes tickets with chunking
-3. **Retrieval Configuration** (lines 1292-1527): Distance threshold, chunking parameters, advanced retrieval settings
-4. **LLM & API Keys** (lines 1528-1665): LLM provider/model selection (OpenAI/Ollama)
-5. **Chat & Results** (lines 1667-2100): Main RAG workflow - query, retrieve, generate answer
-6. **Solutions Memory** (lines 2101-2270): Manage reusable "playbooks" saved from solved tickets
-7. **Preferences & Debug** (lines 2271-2407): Persist settings, debug controls
+1. **YouTrack Connection**: Connects to YouTrack API, loads projects/issues
+2. **MCP Console**: Direct programmatic access to YouTrack via Model Context Protocol
+3. **Embeddings & Vector DB**: Configures Chroma collections, indexes tickets with chunking
+4. **Retrieval Configuration**: Distance threshold, chunking parameters, advanced retrieval settings
+5. **LLM & API Keys**: LLM provider/model selection (OpenAI/Ollama)
+6. **Chat & Results**: Main RAG workflow - query, retrieve, generate answer
+7. **Solutions Memory**: Manage reusable "playbooks" saved from solved tickets
+8. **Preferences & Debug**: Persist settings, debug controls
 
 ### Core Components
 
@@ -75,6 +76,19 @@ This is a **Streamlit-based RAG (Retrieval-Augmented Generation) system** organi
 - Abstraction over OpenAI and Ollama
 - OpenAI: tries Responses API, falls back to Chat Completions
 - Ollama: HTTP REST via `/api/chat` with robust JSON parsing
+
+**MCP Console** (lines 882-1125):
+- Direct interaction with YouTrack via Model Context Protocol (MCP)
+- Uses OpenAI Responses API with MCP tool integration
+- Independent from RAG workflow - operates directly on YouTrack without vector DB
+- Key function: `run_mcp_prompt(prompt, yt_url, yt_token, openai_key)` returns `{ok, readable, raw, error}`
+- **MCP_PROMPT_LIBRARY** (lines 379-440): 20+ preset prompts in 7 categories for common project management queries
+- UI features:
+  - One-click preset prompts with category selector
+  - Auto-run toggle for immediate execution
+  - Project context injection via {{PROJECT}} placeholder
+  - Manual prompt entry with test buttons
+  - Tabbed results (Readable/Raw/Error)
 
 ### Key Technical Patterns
 
@@ -213,19 +227,51 @@ Three CLI utilities in `/bootstraps/` for generating test data:
 
 ## Development Patterns
 
+### Using MCP Console
+The MCP Console provides direct programmatic access to YouTrack without requiring vector indexing:
+
+**Use Cases:**
+- **Quick data exploration**: Search and inspect issues without indexing
+- **Administrative queries**: Get project metadata, issue counts, custom field values
+- **Testing connectivity**: Verify YouTrack API and MCP server functionality
+- **Ad-hoc operations**: One-off queries that don't justify full RAG setup
+- **Project management insights**: Use preset prompts for status, risks, trends, planning
+
+**Preset Prompt Library:**
+The `MCP_PROMPT_LIBRARY` contains 20+ curated prompts organized in 7 categories:
+1. **Quick status**: Project snapshots, recent updates, resolved issues
+2. **Backlog & workload**: State counts, assignee workload, unassigned issues
+3. **Aging & stuck**: Old issues, stuck items, stale updates
+4. **Critical & risks**: Blockers, risk summaries, SLA risks
+5. **Workflow health**: State distribution, regressions, bottlenecks
+6. **Trends**: Creation/resolution rates, lead time estimates
+7. **Planning**: Sprint candidates, carry-over risks, meeting reports
+
+Each preset uses `{{PROJECT}}` placeholder which is automatically replaced with the current project key from Phase 1.
+
+**How it works:**
+1. User selects a category and clicks a preset button OR writes a custom prompt
+2. `run_mcp_prompt()` calls OpenAI Responses API with MCP tool configuration
+3. OpenAI model decides when to call YouTrack MCP server tools
+4. MCP server executes YouTrack API calls with Bearer token authentication
+5. Results returned in three formats: readable (formatted), raw (full object), error (if failed)
+
+**Important:** MCP operations are completely independent from the RAG workflow. They don't create embeddings, don't use the vector database, and don't affect indexed collections.
+
 ### Adding New LLM Providers
-Extend `LLMBackend.__init__()` and `LLMBackend.generate()` (lines 580-675). Follow existing OpenAI/Ollama pattern with fallback logic.
+Extend `LLMBackend.__init__()` and `LLMBackend.generate()`. Follow existing OpenAI/Ollama pattern with fallback logic.
 
 ### Modifying Retrieval Logic
-- **Chunking:** Adjust `split_into_chunks()` (lines 193-219)
-- **Collapsing:** Modify `collapse_by_parent()` (lines 699-733)
-- **Prompting:** Edit `build_prompt()` (lines 683-694) or `RAG_SYSTEM_PROMPT` (lines 678-681)
+- **Chunking:** Adjust `split_into_chunks()`
+- **Collapsing:** Modify `collapse_by_parent()`
+- **Prompting:** Edit `build_prompt()` or `RAG_SYSTEM_PROMPT`
 
 ### Adding New Phases
-1. Create `render_phase_N()` function following existing pattern (lines 760-2407)
-2. Update `PHASE_OPTIONS` dictionary at top of `run_streamlit_app()`
-3. Add phase to sidebar navigation radio
-4. Update progress bar logic
+1. Create `render_phase_N()` function following existing pattern
+2. Update `PHASE_OPTIONS` and `PHASE_COLORS` dictionaries
+3. Add phase icon to `PHASE_ICONS`
+4. Add phase to sidebar navigation radio
+5. Update progress bar logic
 
 ### State Persistence
 To persist new settings:
@@ -254,12 +300,19 @@ To persist new settings:
 **Manual Testing Flow:**
 1. Run `streamlit run app.py --server.port 8502`
 2. Phase 1: Connect with YouTrack URL + Bearer token
-3. Phase 2: Select/create collection, index issues
-4. Phase 3: Tune distance threshold (try 0.7-1.0 range)
-5. Phase 4: Configure LLM (OpenAI requires API key)
-6. Phase 5: Submit query, verify answer has [TICKET-ID] citations
-7. Verify similar results show correct tickets with distances
-8. (Optional) Save answer as playbook in Phase 6
+3. Phase 2 (MCP Console):
+   - Click "Test MCP" button to verify connectivity
+   - Try preset prompts: Select "Quick status" category and click "Project snapshot"
+   - Enable "Auto-run on click" and try another preset
+   - Try custom prompt: "Search the 5 most recent issues in the current project"
+   - Verify tabbed results (Readable/Raw/Error) display correctly
+   - Verify {{PROJECT}} placeholder is replaced with current project key
+4. Phase 3: Select/create collection, index issues
+5. Phase 4: Tune distance threshold (try 0.7-1.0 range)
+6. Phase 5: Configure LLM (OpenAI requires API key for RAG and MCP)
+7. Phase 6: Submit query, verify answer has [TICKET-ID] citations
+8. Verify similar results show correct tickets with distances
+9. (Optional) Save answer as playbook in Phase 7
 
 **Self-Tests:**
 ```bash
@@ -284,3 +337,10 @@ Validates VectorStore, EmbeddingBackend, and LLMBackend initialization.
 **NumPy 2 Compatibility:**
 - Automatic patching applied at startup (lines 41-50)
 - If issues persist, downgrade to NumPy 1.x: `pip install 'numpy<2'`
+
+**MCP Console Requirements:**
+- **Requires OpenAI API**: MCP Console only works with OpenAI (Responses API with MCP tools)
+- **Requires YouTrack Bearer token**: Set in Phase 1
+- **Independent operation**: MCP calls don't require vector DB or embeddings configuration
+- **Error handling**: Check Error tab if MCP calls fail (common: missing credentials, network issues)
+- **Server URL format**: MCP server endpoint is automatically constructed as `{yt_url}/mcp`

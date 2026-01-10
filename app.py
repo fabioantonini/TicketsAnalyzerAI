@@ -359,11 +359,13 @@ PHASE_COLORS = {
     "Solutions memory":         "#FFF0F3",  # light pink
     "Chat & Results":           "#E6FAFF",  # light cyan
     "Preferences & debug":      "#F6F6F6",  # neutral grey
+    "MCP Console":              "#1D0B82",  # dark blue
 }
 
 # Icons for phases (used in sidebar radio)
 PHASE_ICONS = {
     "YouTrack connection":      "🔗",
+    "MCP Console":              "🛠️",
     "Embeddings & Vector DB":   "🧩",
     "Retrieval configuration":  "🔍",
     "LLM & API keys":           "🔑",
@@ -372,6 +374,71 @@ PHASE_ICONS = {
     "Preferences & debug":      "⚙️",
 }
 
+
+# ------------------------------
+# MCP_PROMPT_LIBRARY (one-click)
+# ------------------------------
+# Templates may contain:
+# - {{PROJECT}}: replaced with the current project key (from Phase 1)
+# Keep prompts short and tool-oriented for best MCP behavior.
+MCP_PROMPT_LIBRARY = [
+    {
+        "category": "Quick status",
+        "items": [
+            ("Project snapshot", "Give a concise snapshot of project {{PROJECT}}: open issues, blockers, critical issues, and last updates."),
+            ("Updated last 24h", "List issues in project {{PROJECT}} updated in the last 24 hours. Return idReadable, summary, state, assignee."),
+            ("Resolved last 7d", "List issues resolved in project {{PROJECT}} in the last 7 days. Return idReadable, summary, resolution date."),
+        ],
+    },
+    {
+        "category": "Backlog & workload",
+        "items": [
+            ("State counts", "Group open issues in project {{PROJECT}} by State and provide counts."),
+            ("Workload per assignee", "Group open issues in project {{PROJECT}} by assignee and show counts."),
+            ("Unassigned", "Find unassigned open issues in project {{PROJECT}}. Return idReadable, summary, priority."),
+        ],
+    },
+    {
+        "category": "Aging & stuck",
+        "items": [
+            ("Open > 30 days", "Find issues in project {{PROJECT}} open for more than 30 days. Sort by age descending."),
+            ("Stuck In Progress > 14d", "Find issues in project {{PROJECT}} stuck in 'In Progress' for more than 14 days."),
+            ("Not updated > 21d", "Find open issues in project {{PROJECT}} not updated in the last 21 days."),
+        ],
+    },
+    {
+        "category": "Critical & risks",
+        "items": [
+            ("Critical / Blockers", "List Critical or Blocker issues in project {{PROJECT}}. Include idReadable, summary, state, assignee."),
+            ("Risk summary", "Based on current open issues in project {{PROJECT}}, summarize the main technical and delivery risks."),
+            ("SLA risk (heuristic)", "Identify issues in project {{PROJECT}} likely to miss SLA based on age, priority and state."),
+        ],
+    },
+    {
+        "category": "Workflow health",
+        "items": [
+            ("State distribution", "Show how many issues in project {{PROJECT}} are in each workflow state."),
+            ("Workflow regressions", "Find issues in project {{PROJECT}} that moved backwards in workflow (e.g. Review -> In Progress)."),
+            ("Bottlenecks", "Analyze workflow states in project {{PROJECT}} and identify bottlenecks."),
+        ],
+    },
+    {
+        "category": "Trends",
+        "items": [
+            ("Created per week", "How many issues were created per week in project {{PROJECT}} in the last 2 months?"),
+            ("Resolved per week", "How many issues were resolved per week in project {{PROJECT}} in the last month?"),
+            ("Lead time estimate", "Estimate average time from creation to resolution for issues in project {{PROJECT}}."),
+        ],
+    },
+    {
+        "category": "Planning",
+        "items": [
+            ("Next sprint candidates", "Suggest a prioritized list of issues for the next sprint in project {{PROJECT}}. Explain the reasoning."),
+            ("Carry-over risks", "Which issues in project {{PROJECT}} are most likely to spill into the next sprint?"),
+            ("Meeting report", "Generate a short status report for a project meeting about {{PROJECT}}: progress, blockers, risks, next actions."),
+        ],
+    },
+]
 def inject_global_css():
     """Inject a small global CSS theme for a more modern look."""
     import streamlit as st
@@ -877,6 +944,303 @@ def render_phase_yt_connection_page(prefs):
 
     return yt_url, yt_token, connect
 
+
+# === MCP CONSOLE (auto-added) BEGIN ===
+def run_mcp_prompt(prompt: str, *, yt_url: str, yt_token: str, openai_key: str) -> dict:
+    """Run a prompt against YouTrack MCP server via OpenAI Responses API.
+
+    Returns a dict with keys:
+    - ok: bool
+    - readable: str
+    - raw: object (best-effort)
+    - error: str (if not ok)
+    """
+    if not prompt or not prompt.strip():
+        return {"ok": False, "readable": "", "raw": None, "error": "Empty prompt"}
+
+    if OpenAI is None:
+        return {"ok": False, "readable": "", "raw": None, "error": "openai SDK not available"}
+
+    base = (yt_url or "").rstrip("/")
+    if not base:
+        return {"ok": False, "readable": "", "raw": None, "error": "YouTrack URL missing (configure Phase 1)"}
+
+    if not yt_token:
+        return {"ok": False, "readable": "", "raw": None, "error": "YouTrack token missing (configure Phase 1)"}
+
+    if not openai_key:
+        return {"ok": False, "readable": "", "raw": None, "error": "OpenAI API key missing (configure Phase 5)"}
+
+    client = OpenAI(api_key=openai_key)
+    server_url = f"{base}/mcp"
+
+    try:
+        res = client.responses.create(
+            model="gpt-4o",
+            input=[
+                {"role": "system", "content": "You are a helpful assistant that can call YouTrack MCP tools as needed."},
+                {"role": "user", "content": prompt},
+            ],
+            tools=[
+                {
+                    "type": "mcp",
+                    "server_label": "youtrack",
+                    "server_url": server_url,
+                    "headers": {"Authorization": f"Bearer {yt_token}"},
+                    "require_approval": "never",
+                }
+            ],
+        )
+        readable = getattr(res, "output_text", "") or ""
+        return {"ok": True, "readable": readable, "raw": res, "error": ""}
+    except Exception as e:
+        return {"ok": False, "readable": "", "raw": None, "error": str(e)}
+
+
+
+# --- MCP One-click prompts (JSON) helpers ---
+def load_mcp_prompts_from_json(json_path: str) -> list[dict]:
+    """Load MCP one-click prompts from a JSON file.
+
+    Expected schema:
+    {
+      "version": 1,
+      "categories": [
+        {
+          "name": "Category name",
+          "items": [{"label": "...", "prompt": "..."}]
+        }
+      ]
+    }
+    Returns a normalized list:
+    [
+      {"category": "...", "items": [("Label", "Prompt"), ...]},
+      ...
+    ]
+    """
+    import json
+    import os
+
+    if not json_path:
+        return []
+
+    # Allow env override for deployments
+    json_path = os.environ.get("MCP_PROMPTS_PATH", json_path)
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return []
+    except Exception:
+        # Invalid JSON
+        return []
+
+    cats = data.get("categories", [])
+    out: list[dict] = []
+    for c in cats:
+        name = str(c.get("name", "")).strip()
+        items = c.get("items", []) or []
+        norm_items = []
+        for it in items:
+            lbl = str(it.get("label", "")).strip()
+            prm = str(it.get("prompt", "")).strip()
+            if lbl and prm:
+                norm_items.append((lbl, prm))
+        if name and norm_items:
+            out.append({"category": name, "items": norm_items})
+    return out
+
+
+def get_mcp_prompts_library(default_json_path: str = "mcp_prompts.json") -> list[dict]:
+    """Get cached MCP prompt library in session state (if available)."""
+    import os
+    import streamlit as st  # local import
+
+    # Resolve path with env override
+    json_path = os.environ.get("MCP_PROMPTS_PATH", default_json_path)
+
+    # Cache in session_state for speed and to support "Reload"
+    cache_key = "mcp_prompt_library"
+    path_key = "mcp_prompt_library_path"
+    if cache_key not in st.session_state or st.session_state.get(path_key) != json_path:
+        lib = load_mcp_prompts_from_json(json_path)
+        st.session_state[cache_key] = lib
+        st.session_state[path_key] = json_path
+    return st.session_state.get(cache_key, []) or []
+def render_phase_mcp_console_page(prefs):
+    import streamlit as st  # local import
+
+    st.title("Phase 2 - MCP Console")
+    st.write("Interact with the current YouTrack project via MCP (without changing the rest of the app).")
+
+    yt_url = st.session_state.get("yt_url", "")
+    yt_token = st.session_state.get("yt_token", "")
+    project_key = st.session_state.get("last_project_key", "")
+
+    st.markdown("---")
+    c1, c2, c3 = st.columns([2, 2, 1])
+    with c1:
+        st.caption("YouTrack URL (from Phase 1)")
+        st.code(yt_url or "—")
+    with c2:
+        st.caption("Current project (from Phase 1)")
+        st.code(project_key or "—")
+    with c3:
+        st.caption("Loaded issues")
+        issues_n = len(st.session_state.get("issues", []) or [])
+        st.code(str(issues_n))
+
+    st.markdown("---")
+
+    if "mcp_console_prompt" not in st.session_state:
+        st.session_state["mcp_console_prompt"] = ""
+
+    b1, b2, b3 = st.columns([1, 1, 2])
+    with b1:
+        if st.button("Insert current project"):
+            if project_key:
+                p = st.session_state.get("mcp_console_prompt", "")
+                prefix = f"Project: {project_key}\n"
+                if prefix not in p:
+                    st.session_state["mcp_console_prompt"] = prefix + p
+            else:
+                st.warning("No project selected in Phase 1.")
+    with b2:
+        if st.button("Test MCP"):
+            if project_key:
+                st.session_state["mcp_console_prompt"] = (
+                    f"Search 1 issue in project {project_key} and print its idReadable and summary."
+                )
+            else:
+                st.session_state["mcp_console_prompt"] = "List projects and print their shortName and name."
+    with b3:
+        st.caption("Tip: ask for 'search issues', 'get issue details', 'list projects', etc.")
+
+    # -----------------------------
+    # One-click prompt library
+    # -----------------------------
+    st.markdown("#### One-click prompts")
+
+    # Auto-run toggle (optional)
+    if "mcp_autorun_on_click" not in st.session_state:
+        st.session_state["mcp_autorun_on_click"] = False
+
+    copt1, copt2 = st.columns([1, 3])
+    with copt1:
+        st.session_state["mcp_autorun_on_click"] = st.checkbox(
+            "Auto-run on click",
+            value=bool(st.session_state["mcp_autorun_on_click"]),
+            help="If enabled, clicking a preset will immediately run it via MCP.",
+        )
+    with copt2:
+        st.caption("Presets automatically inject the current project key when needed.")
+
+    # Category select (JSON-backed)
+    # Load presets from mcp_prompts.json (editable) and fallback to embedded library if needed.
+    default_json_path = os.path.join(APP_DIR, "mcp_prompts.json")
+    lib = get_mcp_prompts_library(default_json_path=default_json_path)
+
+    # Optional: allow quick reload without restarting Streamlit
+    c_reload1, c_reload2 = st.columns([1, 4])
+    with c_reload1:
+        if st.button("Reload presets", key="mcp_reload_presets"):
+            # Drop cached library so next call reloads from disk
+            st.session_state.pop("mcp_prompt_library", None)
+            st.session_state.pop("mcp_prompt_library_path", None)
+            lib = get_mcp_prompts_library(default_json_path=default_json_path)
+            st.toast("MCP presets reloaded", icon="🔄")
+    with c_reload2:
+        st.caption(f"Presets path: {os.environ.get('MCP_PROMPTS_PATH', default_json_path)}")
+
+    # Fallback to embedded presets if JSON is missing/empty
+    if not lib:
+        lib = MCP_PROMPT_LIBRARY
+
+    categories = [c.get("category") for c in lib]
+    if "mcp_prompt_category" not in st.session_state:
+        st.session_state["mcp_prompt_category"] = categories[0] if categories else ""
+
+    cat = st.selectbox(
+        "Preset category",
+        options=categories,
+        key="mcp_prompt_category",
+    )
+
+    # Resolve items for the selected category
+    items = []
+    for c in lib:
+        if c.get("category") == cat:
+            items = c.get("items", [])
+            break
+
+    # Render buttons in a grid
+    # Each item is (label, template)
+    if items:
+        cols_per_row = 3
+        for i in range(0, len(items), cols_per_row):
+            row = st.columns(cols_per_row)
+            for j in range(cols_per_row):
+                k = i + j
+                if k >= len(items):
+                    continue
+                label, template = items[k]
+                with row[j]:
+                    if st.button(label, key=f"mcp_preset_btn_{cat}_{k}"):
+                        # Inject current project if present
+                        proj = project_key or ""
+                        text = template.replace("{{PROJECT}}", proj if proj else "{{PROJECT}}")
+
+                        # If project placeholder still exists, prepend a hint
+                        if "{{PROJECT}}" in text:
+                            st.warning("No project selected in Phase 1. Select a project to fully use this preset.")
+                        st.session_state["mcp_console_prompt"] = text
+
+                        # Optionally auto-run
+                        if bool(st.session_state.get("mcp_autorun_on_click")):
+                            openai_key = get_openai_key() or ""
+                            with st.spinner("Running MCP preset..."):
+                                out = run_mcp_prompt(
+                                    st.session_state["mcp_console_prompt"],
+                                    yt_url=yt_url,
+                                    yt_token=yt_token,
+                                    openai_key=openai_key,
+                                )
+                            st.session_state["mcp_console_last"] = out
+
+    st.markdown("---")
+
+    prompt = st.text_area(
+        "Prompt",
+        key="mcp_console_prompt",
+        height=200,
+        placeholder="Example: Search the 10 most recent issues in the current project about 'VPN' and summarize.",
+    )
+
+    run = st.button("Run MCP prompt")
+
+    if run:
+        openai_key = get_openai_key() or ""
+        with st.spinner("Running MCP prompt..."):
+            out = run_mcp_prompt(prompt, yt_url=yt_url, yt_token=yt_token, openai_key=openai_key)
+        st.session_state["mcp_console_last"] = out
+
+    out = st.session_state.get("mcp_console_last")
+    if out:
+        tabs = st.tabs(["Readable", "Raw", "Error"])
+        with tabs[0]:
+            if out.get("ok"):
+                st.write(out.get("readable") or "")
+            else:
+                st.info("No readable output.")
+        with tabs[1]:
+            st.write(out.get("raw"))
+        with tabs[2]:
+            if not out.get("ok"):
+                st.error(out.get("error") or "Unknown error")
+            else:
+                st.caption("No error.")
+# === MCP CONSOLE (auto-added) END ===
 def render_phase_embeddings_vectordb_page(prefs):
     import streamlit as st
 
@@ -915,7 +1279,7 @@ def render_phase_embeddings_vectordb_page(prefs):
     # -----------------------------
     # 1) Header + success message
     # -----------------------------
-    st.title("Phase 2 – Embeddings & Vector DB")
+    st.title("Phase 3 – Embeddings & Vector DB")
     st.write(
         "Configure the Chroma vector store (path and collections) and the embeddings "
         "provider/model used for indexing and query."
@@ -1308,7 +1672,7 @@ def render_phase_embeddings_vectordb_page(prefs):
                     f"{st.session_state['vs_count']}"
                 )
 
-                # Stay in Phase 2 after rerun
+                # Stay in Phase 3 after rerun
                 st.session_state["ui_phase_choice"] = "Embeddings & Vector DB"
 
                 # Force rerun so the status summary and sidebar reflect the updated info
@@ -1351,7 +1715,7 @@ def render_phase_retrieval_page(prefs):
         st.session_state["_adv_reset_toast"] = True
 
     # 3) One-time bootstrap from prefs for missing keys
-    #    (same pattern as Phase 6 – Solutions memory)
+    #    (same pattern as Phase 7 – Solutions memory)
     def init_state(key: str, default):
         """Initialize a session_state key once, if not already set."""
         if key not in st.session_state:
@@ -1365,7 +1729,7 @@ def render_phase_retrieval_page(prefs):
     init_state("chunk_min", int(prefs_dict.get("chunk_min", 512)))
 
     # Canonical prefs are key names without adv_ (show_distances, top_k, …)
-    # Widgets use adv_* (consistent with Phase 7 – Preferences & debug)
+    # Widgets use adv_* (consistent with Phase 8 – Preferences & debug)
     init_state("adv_show_distances", bool(prefs_dict.get("show_distances", False)))
     init_state("adv_top_k", int(prefs_dict.get("top_k", 5)))
     init_state(
@@ -1377,7 +1741,7 @@ def render_phase_retrieval_page(prefs):
     init_state("adv_stitch_max_chars", int(prefs_dict.get("stitch_max_chars", 1500)))
 
     # 4) Main UI
-    st.title("Phase 3 – Retrieval configuration")
+    st.title("Phase 4 – Retrieval configuration")
     st.write(
         "Configure the distance threshold and chunking parameters used to retrieve "
         "similar tickets from the vector store."
@@ -1442,7 +1806,7 @@ def render_phase_retrieval_page(prefs):
         st.session_state["chunk_min"] = int(chunk_min)
 
     st.info(
-        "These settings are used when you run indexing (Phase 2) and when the retriever "
+        "These settings are used when you run indexing (Phase 3) and when the retriever "
         "filters similar tickets (Phase 6)."
     )
 
@@ -1535,7 +1899,7 @@ def render_phase_retrieval_page(prefs):
         st.session_state.get("adv_stitch_max_chars", 1500)
     )
 
-    # 7) Update prefs in memory (Phase 7 handles writing to disk)
+    # 7) Update prefs in memory (Phase 8 handles writing to disk)
     prefs_dict.update(
         {
             "max_distance": float(st.session_state["max_distance"]),
@@ -1562,7 +1926,7 @@ def render_phase_llm_page(prefs):
     else:
         prefs_dict = st.session_state.get("prefs", {})
 
-    st.title("Phase 4 – LLM & API keys")
+    st.title("Phase 5 – LLM & API keys")
     st.write(
         "Configure the LLM provider, model, temperature and API keys used to answer "
         "questions based on the retrieved tickets."
@@ -1754,7 +2118,7 @@ def render_phase_chat_page(prefs):
     # -----------------------------
     # 4) UI
     # -----------------------------
-    st.title("Phase 5 – Chat & Results")
+    st.title("Phase 6 – Chat & Results")
     st.write(
         "Ask questions about your YouTrack tickets. The app retrieves similar tickets "
         "from the vector store, sends them to the LLM, and shows the answer together "
@@ -1791,7 +2155,7 @@ def render_phase_chat_page(prefs):
             ok, _, _ = open_vector_in_session(persist_dir, collection_name)
             if not ok:
                 st.error(
-                    "Open or create a valid collection in Phase 2 (Embeddings & Vector DB)."
+                    "Open or create a valid collection in Phase 3 (Embeddings & Vector DB)."
                 )
                 return
 
@@ -2142,7 +2506,7 @@ def render_phase_solutions_memory_page(prefs):
     if "show_memories" not in st.session_state:
         st.session_state["show_memories"] = bool(prefs_dict.get("show_memories", False))
 
-    st.title("Phase 6 – Solutions memory")
+    st.title("Phase 7 – Solutions memory")
     st.write(
         "Review and manage saved playbooks (memories) derived from solved tickets."
     )
@@ -2279,7 +2643,7 @@ def render_phase_solutions_memory_page(prefs):
             st.error(f"Error reading memories: {e}")
 
 def render_phase_preferences_debug_page(prefs):
-    st.title("Phase 7 – Preferences & debug")
+    st.title("Phase 8 – Preferences & debug")
     st.write(
         "Preferences handling and Debug settings"
     )
@@ -2523,6 +2887,9 @@ def run_streamlit_app():
     if phase == "YouTrack connection":
         yt_url, yt_token, connect = render_phase_yt_connection_page(prefs)
 
+    elif phase == "MCP Console":
+        render_phase_mcp_console_page(prefs)
+
     elif phase == "Embeddings & Vector DB":
         render_phase_embeddings_vectordb_page(prefs)
 
@@ -2548,6 +2915,7 @@ def run_streamlit_app():
         # --- Wizard-style navigation (visual only, all sections still visible) ---
         PHASES = [
             "YouTrack connection",
+            "MCP Console",
             "Embeddings & Vector DB",
             "Retrieval configuration",
             "LLM & API keys",

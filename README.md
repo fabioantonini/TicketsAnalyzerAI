@@ -8,23 +8,25 @@ Streamlit application for technical assistance based on YouTrack tickets, indexe
 
 This app lets you:
 
-- Connect to a YouTrack instance via URL + Bearer token  
-- Load projects and issues, and index them into a Chroma vector store  
-- Configure embeddings, chunking and retrieval behavior  
-- Choose an LLM provider (OpenAI or Ollama) and model  
-- Ask questions in natural language and get answers grounded on similar tickets  
-- Save good answers as reusable “playbooks” in a separate memory collection  
+- Connect to a YouTrack instance via URL + Bearer token
+- Load projects and issues, and index them into a Chroma vector store
+- Interact directly with YouTrack via MCP (Model Context Protocol) for programmatic operations
+- Configure embeddings, chunking and retrieval behavior
+- Choose an LLM provider (OpenAI or Ollama) and model
+- Ask questions in natural language and get answers grounded on similar tickets
+- Save good answers as reusable "playbooks" in a separate memory collection
 - Persist non‑sensitive preferences locally across sessions.
 
 The UI is organized as a **multi‑phase wizard** in the sidebar:
 
-1. YouTrack connection  
-2. Embeddings & Vector DB  
-3. Retrieval configuration  
-4. LLM & API keys  
-5. Solutions memory  
-6. Chat & Results  
-7. Preferences & debug
+1. YouTrack connection
+2. MCP Console
+3. Embeddings & Vector DB
+4. Retrieval configuration
+5. LLM & API keys
+6. Chat & Results
+7. Solutions memory
+8. Preferences & debug
 
 ---
 
@@ -42,7 +44,58 @@ The UI is organized as a **multi‑phase wizard** in the sidebar:
 
 ---
 
-### 2.2 Phase 2 – Embeddings & Vector DB
+### 2.2 Phase 2 – MCP Console
+
+The MCP Console provides direct programmatic access to YouTrack through the Model Context Protocol, allowing you to interact with your YouTrack instance without going through the RAG workflow.
+
+#### Features
+
+- **Direct YouTrack interaction**: Execute operations on YouTrack via natural language prompts
+- **One-click prompt library**: 20+ preset prompts organized in 7 categories:
+  - Quick status (project snapshots, recent updates)
+  - Backlog & workload (state counts, assignee workload)
+  - Aging & stuck (old issues, stale updates)
+  - Critical & risks (blockers, SLA risks)
+  - Workflow health (bottlenecks, regressions)
+  - Trends (creation/resolution rates, lead time)
+  - Planning (sprint candidates, meeting reports)
+- **Project context**: Automatically insert the current project context from Phase 1
+- **Auto-run toggle**: Execute preset prompts immediately on click
+- **Test prompts**: Quick-start button to test MCP connectivity
+- **Tabbed results**: View responses in three tabs:
+  - **Readable**: Human-friendly formatted output
+  - **Raw**: Complete response object for debugging
+  - **Error**: Error messages if the request fails
+
+#### How to use
+
+1. **Connect to YouTrack** in Phase 1 (URL + Bearer token required)
+2. **Configure OpenAI API key** in Phase 5 (MCP requires OpenAI)
+3. **Navigate to MCP Console** (Phase 2)
+4. **Option A - Use preset prompts:**
+   - Select a category from the dropdown (e.g., "Quick status", "Critical & risks")
+   - Click any preset button to load the prompt
+   - Enable "Auto-run on click" to execute immediately
+   - Presets automatically inject the current project key
+5. **Option B - Write custom prompts:**
+   - Write a natural language prompt, such as:
+     - "Search the 10 most recent issues in the current project about 'VPN'"
+     - "Get details for issue NETS-123"
+     - "List all projects and their short names"
+   - Click "Run MCP prompt" to execute
+
+#### Use cases
+
+- **Quick data exploration**: Search and inspect issues without indexing
+- **Administrative tasks**: Query project metadata, issue counts, etc.
+- **Integration testing**: Verify YouTrack connectivity and MCP server functionality
+- **Ad-hoc queries**: Answer one-off questions without creating vector embeddings
+
+**Note:** MCP operations are independent of the RAG workflow and do not affect or use the vector database.
+
+---
+
+### 2.3 Phase 3 – Embeddings & Vector DB
 
 #### Chroma path and collections
 
@@ -79,7 +132,7 @@ The UI is organized as a **multi‑phase wizard** in the sidebar:
 #### Ticket indexing (with chunking)
 
 - “Index tickets” button indexes all currently loaded issues into the selected collection.  
-- Long ticket texts are **chunked** with configurable parameters (see Phase 3):
+- Long ticket texts are **chunked** with configurable parameters (see Phase 4):
   - Token‑based when `tiktoken` is available, otherwise whitespace‑based  
   - Metadata per chunk:
     - `parent_id` = original ticket ID  
@@ -94,30 +147,30 @@ The UI is organized as a **multi‑phase wizard** in the sidebar:
 
 ---
 
-### 2.3 Phase 3 – Retrieval Configuration
+### 2.4 Phase 4 – Retrieval Configuration
 
 This phase controls how results are retrieved and aggregated from Chroma.
 
 #### Distance threshold
 
-- Slider `max_distance` (cosine distance), default **0.9**.  
-- Both KB (tickets) and MEM (playbooks) results are filtered: only those with `distance <= max_distance` are kept.  
+- Slider `max_distance` (cosine distance), default **0.9**.
+- Both KB (tickets) and MEM (playbooks) results are filtered: only those with `distance <= max_distance` are kept.
 
 Typical usage:
 
-- Lower values → more precise, fewer but highly relevant results  
-- Higher values → more permissive, useful when the KB is small or noisy  
+- Lower values → more precise, fewer but highly relevant results
+- Higher values → more permissive, useful when the KB is small or noisy
 
 #### Chunking configuration
 
 Controls how long tickets are split when indexing:
 
-- `enable_chunking` (checkbox)  
-- `chunk_size` (tokens), default 800  
-- `chunk_overlap` (tokens), default 80  
-- `chunk_min`: below this size, tickets are indexed as a single document (default 512).  
+- `enable_chunking` (checkbox)
+- `chunk_size` (tokens), default 800
+- `chunk_overlap` (tokens), default 80
+- `chunk_min`: below this size, tickets are indexed as a single document (default 512).
 
-These settings are used in **Phase 2** during indexing via `split_into_chunks`.
+These settings are used in **Phase 3** during indexing via `split_into_chunks`.
 
 #### Advanced retrieval settings
 
@@ -136,7 +189,7 @@ All these settings are synced to canonical keys used by the Chat phase (`top_k`,
 
 ---
 
-### 2.4 Phase 4 – LLM & API Keys
+### 2.5 Phase 5 – LLM & API Keys
 
 - LLM providers:
   - **OpenAI**  
@@ -157,7 +210,7 @@ All these settings are synced to canonical keys used by the Chat phase (`top_k`,
 
 ---
 
-### 2.5 Phase 5 – Chat & Results
+### 2.6 Phase 6 – Chat & Results
 
 The core RAG workflow.
 
@@ -226,7 +279,7 @@ The core RAG workflow.
 
 ---
 
-### 2.6 Phase 6 – Solutions Memory
+### 2.7 Phase 7 – Solutions Memory
 
 This page manages the **playbook memory** stored in the separate `memories` collection.
 
@@ -251,7 +304,7 @@ This page manages the **playbook memory** stored in the separate `memories` coll
 
 ---
 
-### 2.7 Phase 7 – Preferences & Debug
+### 2.8 Phase 8 – Preferences & Debug
 
 - Toggle **Enable preferences memory (local)**:
   - If enabled, non‑sensitive prefs are stored in `.app_prefs.json` (local or `/tmp` in cloud).  
@@ -295,7 +348,7 @@ From the Chat page:
 
 The sidebar provides:
 
-- Phase navigation (radio with 7 phases + progress bar)  
+- Phase navigation (radio with 8 phases + progress bar)  
 - YouTrack status (connected / not connected, current URL)  
 - Vector DB / Embeddings summary:
   - persist_dir, active collection, embedding provider/model  
