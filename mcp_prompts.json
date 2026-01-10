@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "name": "Quick status",
+      "items": [
+        {
+          "label": "Project snapshot",
+          "prompt": "Give a concise snapshot of project {{PROJECT}}: open issues, blockers, critical issues, and last updates."
+        },
+        {
+          "label": "Updated last 24h",
+          "prompt": "List issues in project {{PROJECT}} updated in the last 24 hours. Return idReadable, summary, state, assignee."
+        },
+        {
+          "label": "Resolved last 7d",
+          "prompt": "List issues resolved in project {{PROJECT}} in the last 7 days. Return idReadable, summary, resolution date."
+        }
+      ]
+    },
+    {
+      "name": "Backlog & workload",
+      "items": [
+        {
+          "label": "State counts",
+          "prompt": "Group open issues in project {{PROJECT}} by State and provide counts."
+        },
+        {
+          "label": "Workload per assignee",
+          "prompt": "Group open issues in project {{PROJECT}} by assignee and show counts."
+        },
+        {
+          "label": "Unassigned",
+          "prompt": "Find unassigned open issues in project {{PROJECT}}. Return idReadable, summary, priority."
+        }
+      ]
+    },
+    {
+      "name": "Aging & stuck",
+      "items": [
+        {
+          "label": "Open > 30 days",
+          "prompt": "Find issues in project {{PROJECT}} open for more than 30 days. Sort by age descending."
+        },
+        {
+          "label": "Stuck In Progress > 14d",
+          "prompt": "Find issues in project {{PROJECT}} stuck in 'In Progress' for more than 14 days."
+        },
+        {
+          "label": "Not updated > 21d",
+          "prompt": "Find open issues in project {{PROJECT}} not updated in the last 21 days."
+        }
+      ]
+    },
+    {
+      "name": "Critical & risks",
+      "items": [
+        {
+          "label": "Critical / Blockers",
+          "prompt": "List Critical or Blocker issues in project {{PROJECT}}. Include idReadable, summary, state, assignee."
+        },
+        {
+          "label": "Risk summary",
+          "prompt": "Based on current open issues in project {{PROJECT}}, summarize the main technical and delivery risks."
+        },
+        {
+          "label": "SLA risk (heuristic)",
+          "prompt": "Identify issues in project {{PROJECT}} likely to miss SLA based on age, priority and state."
+        }
+      ]
+    },
+    {
+      "name": "Workflow health",
+      "items": [
+        {
+          "label": "State distribution",
+          "prompt": "Show how many issues in project {{PROJECT}} are in each workflow state."
+        },
+        {
+          "label": "Workflow regressions",
+          "prompt": "Find issues in project {{PROJECT}} that moved backwards in workflow (e.g. Review -> In Progress)."
+        },
+        {
+          "label": "Bottlenecks",
+          "prompt": "Analyze workflow states in project {{PROJECT}} and identify bottlenecks."
+        }
+      ]
+    },
+    {
+      "name": "Trends",
+      "items": [
+        {
+          "label": "Created per week",
+          "prompt": "How many issues were created per week in project {{PROJECT}} in the last 2 months?"
+        },
+        {
+          "label": "Resolved per week",
+          "prompt": "How many issues were resolved per week in project {{PROJECT}} in the last month?"
+        },
+        {
+          "label": "Lead time estimate",
+          "prompt": "Estimate average time from creation to resolution for issues in project {{PROJECT}}."
+        }
+      ]
+    },
+    {
+      "name": "Planning",
+      "items": [
+        {
+          "label": "Next sprint candidates",
+          "prompt": "Suggest a prioritized list of issues for the next sprint in project {{PROJECT}}. Explain the reasoning."
+        },
+        {
+          "label": "Carry-over risks",
+          "prompt": "Which issues in project {{PROJECT}} are most likely to spill into the next sprint?"
+        },
+        {
+          "label": "Meeting report",
+          "prompt": "Generate a short status report for a project meeting about {{PROJECT}}: progress, blockers, risks, next actions."
+        }
+      ]
+    }
+  ]
+}

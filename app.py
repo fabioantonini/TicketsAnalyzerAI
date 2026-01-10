@@ -997,6 +997,77 @@ def run_mcp_prompt(prompt: str, *, yt_url: str, yt_token: str, openai_key: str) 
         return {"ok": False, "readable": "", "raw": None, "error": str(e)}
 
 
+
+# --- MCP One-click prompts (JSON) helpers ---
+def load_mcp_prompts_from_json(json_path: str) -> list[dict]:
+    """Load MCP one-click prompts from a JSON file.
+
+    Expected schema:
+    {
+      "version": 1,
+      "categories": [
+        {
+          "name": "Category name",
+          "items": [{"label": "...", "prompt": "..."}]
+        }
+      ]
+    }
+    Returns a normalized list:
+    [
+      {"category": "...", "items": [("Label", "Prompt"), ...]},
+      ...
+    ]
+    """
+    import json
+    import os
+
+    if not json_path:
+        return []
+
+    # Allow env override for deployments
+    json_path = os.environ.get("MCP_PROMPTS_PATH", json_path)
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return []
+    except Exception:
+        # Invalid JSON
+        return []
+
+    cats = data.get("categories", [])
+    out: list[dict] = []
+    for c in cats:
+        name = str(c.get("name", "")).strip()
+        items = c.get("items", []) or []
+        norm_items = []
+        for it in items:
+            lbl = str(it.get("label", "")).strip()
+            prm = str(it.get("prompt", "")).strip()
+            if lbl and prm:
+                norm_items.append((lbl, prm))
+        if name and norm_items:
+            out.append({"category": name, "items": norm_items})
+    return out
+
+
+def get_mcp_prompts_library(default_json_path: str = "mcp_prompts.json") -> list[dict]:
+    """Get cached MCP prompt library in session state (if available)."""
+    import os
+    import streamlit as st  # local import
+
+    # Resolve path with env override
+    json_path = os.environ.get("MCP_PROMPTS_PATH", default_json_path)
+
+    # Cache in session_state for speed and to support "Reload"
+    cache_key = "mcp_prompt_library"
+    path_key = "mcp_prompt_library_path"
+    if cache_key not in st.session_state or st.session_state.get(path_key) != json_path:
+        lib = load_mcp_prompts_from_json(json_path)
+        st.session_state[cache_key] = lib
+        st.session_state[path_key] = json_path
+    return st.session_state.get(cache_key, []) or []
 def render_phase_mcp_console_page(prefs):
     import streamlit as st  # local import
 
