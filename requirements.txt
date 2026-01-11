@@ -1,21 +1,51 @@
+# ===============================
 # Core app
+# ===============================
 streamlit==1.38.0
 requests>=2.31.0
-pandas>=2.2.2
 
-# Chroma: tieni la serie 0.4.x per evitare breaking changes 0.5.x
-chromadb>=0.4.22,<0.5
+# ===============================
+# Numeric stack (CRITICAL)
+# ===============================
+numpy==1.26.4
+pandas>=2.2.2,<2.3
 
+# ===============================
+# Vector DB
+# ===============================
+chromadb==0.4.24
 duckdb>=0.9.2
+protobuf<5
 
-# OpenAI SDK recente (Responses API + compat chat)
+# ===============================
+# OpenAI SDK
+# ===============================
 openai>=1.40.0,<2
 tiktoken>=0.7.0
 
-# NOTA: su Streamlit Cloud non installare modelli locali
-# sentence-transformers e ollama sono volutamente esclusi
+# ===============================
+# FastAPI stack
+# ===============================
+fastapi>=0.127,<1
+pydantic>=2.11,<3
+uvicorn>=0.23,<1
 
-# FastAPI per API
-fastapi
-uvicorn  
-pydantic
+# ===============================
+# Document parsing
+# ===============================
+PyPDF2>=3.0.1
+python-docx>=1.1.0
+chardet>=5.2.0
+pymupdf>=1.24.0
+pdfplumber>=0.11.0
+
+# ===============================
+# PDF export
+# ===============================
+reportlab>=4.0.8
+markdown>=3.6
+
+# ===============================
+# Utilities
+# ===============================
+tqdm
