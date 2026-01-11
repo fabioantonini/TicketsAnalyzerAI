@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py ./
 COPY service_webhook.py ./
 COPY rag_core.py ./
+COPY mcp_prompts.json ./
 COPY README.md ./
 COPY start_docker.sh ./
 
