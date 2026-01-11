@@ -44,7 +44,7 @@ pip install -r requirements-local.txt
 
 ### Application Structure
 
-This is a **Streamlit-based RAG (Retrieval-Augmented Generation) system** organized as an 8-phase wizard:
+This is a **Streamlit-based RAG (Retrieval-Augmented Generation) system** organized as a 9-phase wizard:
 
 1. **YouTrack Connection**: Connects to YouTrack API, loads projects/issues
 2. **MCP Console**: Direct programmatic access to YouTrack via Model Context Protocol
@@ -54,6 +54,7 @@ This is a **Streamlit-based RAG (Retrieval-Augmented Generation) system** organi
 6. **Chat & Results**: Main RAG workflow - query, retrieve, generate answer
 7. **Solutions Memory**: Manage reusable "playbooks" saved from solved tickets
 8. **Preferences & Debug**: Persist settings, debug controls
+9. **Docs KB (PDF/DOCX/TXT)**: Upload and index PDF/DOCX/TXT documentation, RAG queries for CLI docs
 
 ### Core Components
 
@@ -90,6 +91,30 @@ This is a **Streamlit-based RAG (Retrieval-Augmented Generation) system** organi
   - Manual prompt entry with test buttons
   - Tabbed results (Readable/Raw/Error)
 
+**Docs KB System** (lines 3215-4095):
+- Dedicated knowledge base for technical documentation (PDF/DOCX/TXT)
+- Independent from YouTrack tickets, uses separate `docs_kb` collection
+- **Text extraction functions**:
+  - `_extract_text_from_pdf_bytes()`: PyMuPDF → pdfplumber → PyPDF2 fallback
+  - `_extract_text_from_docx_bytes()`: python-docx paragraph extraction
+  - `_extract_text_from_txt_bytes()`: UTF-8 with chardet fallback
+- **Document management**:
+  - `_load_docs_manifest()` / `_save_docs_manifest()`: Track indexed docs in `docs_kb__manifest.json`
+  - `_sha256_bytes()`: SHA256-based deduplication
+  - `_clean_extracted_text()`: Normalize text (control chars, spaces, hyphenation)
+- **PDF export**:
+  - `export_markdown_to_pdf_structured()`: ReportLab-based PDF generation
+  - `_md_split_blocks()`: Custom Markdown parser (headings, lists, code, paragraphs)
+  - `_md_inline_to_rl()`: Convert inline MD (`**bold**`, `*italic*`, `` `code` ``) to ReportLab markup
+  - `_normalize_soft_numbered_lists()`: Fix "soft" numbered lists (e.g., "1 item" → "1. item")
+- **RAG prompt**: `_build_docs_prompt()` - CLI-specialized system prompt with Italian answers
+- UI features:
+  - Upload multiple files (PDF/DOCX/TXT)
+  - Index with reused chunking/embedding
+  - RAG query with LLM answer
+  - Export answer to formatted PDF
+  - Manage documents (list, delete with confirmation)
+
 ### Key Technical Patterns
 
 **Chunking Strategy** (lines 193-219):
@@ -120,6 +145,15 @@ collapse_by_parent(results, per_parent, stitch_for_prompt, max_chars)
 - Condensed via LLM into 3-6 imperative steps
 - Retrieved alongside KB results (up to 2 playbooks per query)
 - Marked with 🧠 icon in UI
+
+**Docs KB Document Processing** (lines 3227-3350):
+- **Extraction chain**: Tries multiple backends with fallback for robustness
+- **Text cleanup**: Removes control chars, normalizes spaces, de-hyphenates line breaks
+- **Deduplication**: SHA256 hash computed on raw bytes prevents re-indexing
+- **Metadata tracking**: Manifest file stores doc_id, filename, doc_type, chunks, bytes, timestamp
+- **Chunking**: Reuses existing `split_into_chunks()` with Phase 4 settings
+- **Embedding**: Reuses `EmbeddingBackend` from Phase 5
+- **Storage**: Separate `docs_kb` collection, metadata includes source_file, doc_type, chunk_id, pos
 
 ### Session State Management
 
@@ -288,6 +322,7 @@ To persist new settings:
 | `.app_prefs.json` | Persisted user preferences (local/`/tmp`) |
 | `data/chroma/` | ChromaDB storage (local development) |
 | `data_docker/chroma/` | ChromaDB storage (Docker container) |
+| `docs_kb__manifest.json` | Manifest of indexed documents (in Chroma persist_dir) |
 | `.streamlit/secrets.toml` | Streamlit secrets (API keys, optional) |
 | `requirements.txt` | Core dependencies (no local models) |
 | `requirements-local.txt` | Local development (with sentence-transformers) |
@@ -313,6 +348,17 @@ To persist new settings:
 7. Phase 6: Submit query, verify answer has [TICKET-ID] citations
 8. Verify similar results show correct tickets with distances
 9. (Optional) Save answer as playbook in Phase 7
+10. Phase 9 (Docs KB):
+   - Upload a PDF/DOCX/TXT file
+   - Click "Index uploaded documents" and verify success message
+   - Check document appears in "Indexed documents" list
+   - Enter a question in the text area
+   - Click "Search in Docs KB" and verify:
+     - Retrieved chunks shown with source file and chunk IDs
+     - LLM answer in Italian with CLI examples in code blocks
+     - Sources section lists filenames
+   - Click "Generate PDF" and download to verify formatted PDF export
+   - Test document deletion (checkbox + remove button)
 
 **Self-Tests:**
 ```bash
@@ -344,3 +390,11 @@ Validates VectorStore, EmbeddingBackend, and LLMBackend initialization.
 - **Independent operation**: MCP calls don't require vector DB or embeddings configuration
 - **Error handling**: Check Error tab if MCP calls fail (common: missing credentials, network issues)
 - **Server URL format**: MCP server endpoint is automatically constructed as `{yt_url}/mcp`
+
+**Docs KB Known Issues:**
+- **Scanned PDFs**: No OCR support - only text-based PDFs work. Scanned images will return empty text.
+- **Complex DOCX**: Tables, embedded objects not extracted. Only paragraph text supported.
+- **Large files**: Very large PDFs (>100MB) may be slow. Consider splitting before upload.
+- **Encoding**: Non-UTF8 TXT files use chardet detection - may have minor errors.
+- **PDF export**: Markdown must be valid - malformed syntax may break PDF generation. See Phase 9 formatting rules.
+- **Numbered lists**: PDF export requires strict "1. item" format. Soft lists ("1 item") are auto-normalized.

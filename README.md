@@ -11,9 +11,10 @@ This app lets you:
 - Connect to a YouTrack instance via URL + Bearer token
 - Load projects and issues, and index them into a Chroma vector store
 - Interact directly with YouTrack via MCP (Model Context Protocol) for programmatic operations
+- Upload and index PDF/DOCX/TXT documentation for CLI command reference
 - Configure embeddings, chunking and retrieval behavior
 - Choose an LLM provider (OpenAI or Ollama) and model
-- Ask questions in natural language and get answers grounded on similar tickets
+- Ask questions in natural language and get answers grounded on similar tickets or documentation
 - Save good answers as reusable "playbooks" in a separate memory collection
 - Persist non‑sensitive preferences locally across sessions.
 
@@ -27,6 +28,7 @@ The UI is organized as a **multi‑phase wizard** in the sidebar:
 6. Chat & Results
 7. Solutions memory
 8. Preferences & debug
+9. Docs KB (PDF/DOCX/TXT)
 
 ---
 
@@ -322,7 +324,73 @@ This page manages the **playbook memory** stored in the separate `memories` coll
 
 **Debug**
 
-- “Show LLM prompt” checkbox: same flag used by the Chat phase to optionally display the prompt.  
+- "Show LLM prompt" checkbox: same flag used by the Chat phase to optionally display the prompt.
+
+---
+
+### 2.9 Phase 9 – Docs KB (PDF/DOCX/TXT)
+
+This phase provides a dedicated knowledge base for technical documentation (PDF/DOCX/TXT), separate from YouTrack tickets.
+
+#### Features
+
+- **Multi-format document upload**: PDF, DOCX, TXT via Streamlit file uploader
+- **Robust text extraction**:
+  - PDF: PyMuPDF → pdfplumber → PyPDF2 fallback chain
+  - DOCX: python-docx paragraph extraction
+  - TXT: UTF-8 with charset detection fallback (chardet)
+- **Dedicated collection**: `docs_kb` ChromaDB collection (separate from tickets)
+- **Document manifest**: SHA256-based deduplication with metadata tracking
+- **RAG queries**: Specialized prompt for CLI documentation (Italian answers)
+- **PDF export**: Export answers as formatted PDF with Markdown rendering
+  - Supports headings, lists (ordered/unordered), code blocks, inline formatting
+  - ReportLab-based structured document generation
+
+#### How to use
+
+1. **Navigate to Phase 9** (Docs KB)
+2. **Upload documents**: Select PDF/DOCX/TXT files (multiple selection supported)
+3. **Index documents**: Click "Index uploaded documents"
+   - Extraction runs with fallback chain
+   - Chunking applied (reuses Phase 4 settings)
+   - Embeddings computed (uses Phase 5 embeddings provider)
+   - Stored in `docs_kb` collection
+4. **Ask questions**:
+   - Enter question in Italian (e.g., "Come configuro RPKI? Fammi un esempio")
+   - Select Top K (number of chunks to retrieve)
+   - Enable/disable LLM answer
+   - Click "Search in Docs KB"
+5. **View results**:
+   - Retrieved chunks shown in expander (with source file, chunk ID, distance)
+   - LLM answer in Markdown with CLI examples in code blocks
+   - Sources section at bottom
+6. **Export to PDF** (optional):
+   - Click "Generate PDF" to create downloadable PDF
+   - Download via "Download answer as PDF" button
+
+#### Document management
+
+- **List indexed documents**: Shows filename, doc_id, chunks, size, timestamp
+- **Delete documents**: Check "confirm" + click 🗑️ remove button
+- **Deduplication**: SHA256 hash prevents re-indexing same file
+
+#### Metadata preserved
+
+Each document chunk stores:
+- `doc_id`: SHA256 hash (first 16 chars)
+- `source_file`: Original filename
+- `doc_type`: pdf/docx/txt
+- `chunk_id`: Chunk number (if multi-chunk)
+- `pos`: Token offset (if chunking enabled)
+
+#### Use cases
+
+- **CLI command reference**: Index networking device CLI documentation
+- **Configuration examples**: Search for specific command syntax
+- **Troubleshooting guides**: Find procedures for common issues
+- **Technical manuals**: Query device specifications, capabilities, limitations
+
+**Note:** Docs KB operates independently from YouTrack. It uses the same embedding provider (Phase 5) and retrieval settings (Phase 4) but queries a separate collection.
 
 ---
 
@@ -348,7 +416,7 @@ From the Chat page:
 
 The sidebar provides:
 
-- Phase navigation (radio with 8 phases + progress bar)  
+- Phase navigation (radio with 9 phases + progress bar)  
 - YouTrack status (connected / not connected, current URL)  
 - Vector DB / Embeddings summary:
   - persist_dir, active collection, embedding provider/model  
@@ -375,12 +443,16 @@ The sidebar also automatically opens the active collection (if any) and shows th
 
 Install from `requirements.txt`, typically including:
 
-- `streamlit`  
-- `chromadb`  
-- `sentence-transformers` (for local embeddings)  
-- `openai`  
-- `tiktoken` (optional, for token‑based chunking)  
-- `requests`, `pandas` and other standard utilities.  
+- `streamlit`
+- `chromadb`
+- `sentence-transformers` (for local embeddings)
+- `openai`
+- `tiktoken` (optional, for token‑based chunking)
+- `requests`, `pandas` and other standard utilities.
+
+Additional dependencies for Phase 9 (Docs KB):
+- **Document parsing**: `PyPDF2`, `python-docx`, `chardet`, `pymupdf`, `pdfplumber`
+- **PDF export**: `reportlab`, `markdown`
 
 ```bash
 pip install -r requirements.txt
