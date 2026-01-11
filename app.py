@@ -3341,15 +3341,25 @@ def _extract_text_from_docx_bytes(data: bytes) -> str:
 
 
 def _extract_table_text(table) -> str:
-    """Convert DOCX table to readable text format."""
+    """Convert DOCX table to readable text format, handling merged cells."""
     if not table.rows:
         return ""
 
     lines = []
     for row in table.rows:
-        cells = [cell.text.strip() for cell in row.cells]
-        # Filter empty cells and join with separator
-        cells_text = [c for c in cells if c]
+        # Track merged cells by internal object ID to avoid duplication
+        seen_cells = set()
+        cells_text = []
+
+        for cell in row.cells:
+            # Merged cells share the same _tc object, use id() to detect
+            cell_id = id(cell._tc)
+            if cell_id not in seen_cells:
+                seen_cells.add(cell_id)
+                text = cell.text.strip()
+                if text:
+                    cells_text.append(text)
+
         if cells_text:
             lines.append(" | ".join(cells_text))
 
