@@ -470,7 +470,29 @@ Optional environment variables:
 
 ## 6. Running the App
 
-### 6.1 Streamlit mode (recommended)
+### 6.1 Quick Start (All-in-One)
+
+**Recommended**: Start both Streamlit UI and FastAPI webhook service automatically:
+
+```bash
+# Python script (cross-platform)
+python start_local.py
+
+# Or bash script (Linux/Mac)
+chmod +x start_local.sh
+./start_local.sh
+```
+
+This starts:
+- Streamlit UI on http://localhost:8502
+- FastAPI webhook on http://127.0.0.1:8010
+- API docs on http://127.0.0.1:8010/docs
+
+Press `Ctrl+C` to stop both services.
+
+### 6.2 Streamlit only (manual)
+
+If you only need the UI without the webhook service:
 
 ```bash
 streamlit run app.py --server.port 8502
@@ -478,7 +500,17 @@ streamlit run app.py --server.port 8502
 
 Then open the browser at the URL printed by Streamlit.
 
-### 6.2 CLI self‑tests
+### 6.3 FastAPI webhook only (manual)
+
+If you need to run the webhook service separately:
+
+```bash
+uvicorn service_webhook:app --host 127.0.0.1 --port 8010 --log-level info
+```
+
+Access API docs at http://127.0.0.1:8010/docs
+
+### 6.4 CLI self‑tests
 
 If Streamlit is not available and you run:
 
@@ -488,42 +520,71 @@ python app.py
 
 the app prints basic usage help and runs minimal self‑tests:
 
-- VectorStore initialization  
-- Local embeddings (if `sentence-transformers` is installed)  
-- LLM backend initialization for OpenAI / Ollama (when possible).  
+- VectorStore initialization
+- Local embeddings (if `sentence-transformers` is installed)
+- LLM backend initialization for OpenAI / Ollama (when possible).
 
 ---
 
-## 7. Docker Notes
+## 7. Docker Deployment
 
-The app is Docker‑friendly but does not enforce any specific volume layout.  
-A practical pattern is:
+### 7.1 Quick Start
+
+```bash
+# Copy environment template
+cp .env.example .env
+# Edit .env with your values
+
+# Start both services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
+```
+
+Access services:
+- Streamlit UI: http://localhost:8503
+- FastAPI webhook: http://localhost:8010
+- API docs: http://localhost:8010/docs
+
+### 7.2 Configuration
+
+The Docker setup automatically starts both Streamlit and FastAPI services. Configure via environment variables in `.env`:
+
+**Required:**
+```bash
+OPENAI_API_KEY=sk-...
+```
+
+**Optional (webhook service):**
+```bash
+YT_BASE_URL=https://your-youtrack.myjetbrains.com
+YT_TOKEN=perm:your-token-here
+WEBHOOK_SECRET=your-secret-key
+```
+
+See `.env.example` for all available options.
+
+### 7.3 Data Persistence
+
+ChromaDB data is persisted in `./data_docker/chroma/` when using docker-compose.
 
 ```text
 project-root/
     app.py
+    service_webhook.py
+    start_local.py
+    start_docker.sh
     data/          ← local Chroma (when running on host)
     data_docker/   ← Chroma used inside Docker
 ```
 
-Example `docker-compose.yml`:
+### 7.4 Advanced Deployment
 
-```yaml
-services:
-  rag-support-app:
-    build: .
-    container_name: rag_support_app
-    ports:
-      - "8503:8501"
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
-      - STREAMLIT_SERVER_PORT=8501
-    volumes:
-      - ./data_docker:/app/data
-      - ./.streamlit:/app/.streamlit:ro
-    restart: unless-stopped
-```
+For production deployments, Streamlit Cloud limitations, separate FastAPI hosting, and troubleshooting, see [DEPLOYMENT.md](./DEPLOYMENT.md).
 
 With this configuration:
 
