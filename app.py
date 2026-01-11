@@ -3293,14 +3293,72 @@ def _extract_text_from_pdf_bytes(data: bytes) -> str:
     return "\n".join(parts).strip()
 
 def _extract_text_from_docx_bytes(data: bytes) -> str:
-    """Extract text from DOCX bytes."""
-    from docx import Document
-    doc = Document(io.BytesIO(data))
-    parts = []
-    for p in doc.paragraphs:
-        if p.text and p.text.strip():
-            parts.append(p.text)
-    return "\n".join(parts).strip()
+    """Extract text from DOCX bytes, including tables and preserving structure."""
+    try:
+        from docx import Document
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
+        doc = Document(io.BytesIO(data))
+        parts = []
+
+        # Extract from body (preserves order of paragraphs and tables)
+        for element in doc.element.body:
+            # Paragraph
+            if element.tag.endswith('}p'):
+                para = Paragraph(element, doc)
+                if para.text and para.text.strip():
+                    parts.append(para.text)
+
+            # Table
+            elif element.tag.endswith('}tbl'):
+                table = Table(element, doc)
+                table_text = _extract_table_text(table)
+                if table_text:
+                    parts.append(table_text)
+
+        # Also extract headers/footers (may contain version info, notes)
+        for section in doc.sections:
+            if section.header:
+                header_text = "\n".join(p.text for p in section.header.paragraphs if p.text.strip())
+                if header_text:
+                    parts.insert(0, f"[Header]\n{header_text}")
+            if section.footer:
+                footer_text = "\n".join(p.text for p in section.footer.paragraphs if p.text.strip())
+                if footer_text:
+                    parts.append(f"[Footer]\n{footer_text}")
+
+        return "\n\n".join(parts).strip()
+
+    except Exception as e:
+        # Fallback: try simple paragraph extraction
+        try:
+            from docx import Document
+            doc = Document(io.BytesIO(data))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip()).strip()
+        except Exception:
+            raise RuntimeError(f"Failed to extract DOCX: {e}")
+
+
+def _extract_table_text(table) -> str:
+    """Convert DOCX table to readable text format."""
+    if not table.rows:
+        return ""
+
+    lines = []
+    for row in table.rows:
+        cells = [cell.text.strip() for cell in row.cells]
+        # Filter empty cells and join with separator
+        cells_text = [c for c in cells if c]
+        if cells_text:
+            lines.append(" | ".join(cells_text))
+
+    if lines:
+        # Add separator after header (first row)
+        if len(lines) > 1:
+            lines.insert(1, "-" * min(80, len(lines[0])))
+        return "\n".join(lines)
+    return ""
 
 def _extract_text_from_txt_bytes(data: bytes) -> str:
     """Extract text from TXT bytes with charset detection fallback."""
