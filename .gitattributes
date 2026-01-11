@@ -1,0 +1,21 @@
+# Force LF line endings for shell scripts (required for Docker/Linux)
+*.sh text eol=lf
+
+# Python files should use LF
+*.py text eol=lf
+
+# Markdown and docs
+*.md text eol=lf
+
+# JSON files
+*.json text eol=lf
+
+# YAML files
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Text files
+*.txt text eol=lf
+
+# Environment files
+.env* text eol=lf
