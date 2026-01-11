@@ -19,6 +19,42 @@ FASTAPI_HOST = "127.0.0.1"
 processes = []
 
 
+def load_env_file(env_path=".env"):
+    """Load environment variables from .env file if it exists."""
+    if not Path(env_path).exists():
+        return False
+
+    print(f"📋 Loading environment from {env_path}...")
+    loaded_count = 0
+
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            # Skip empty lines and comments
+            if not line or line.startswith("#"):
+                continue
+
+            # Parse KEY=VALUE
+            if "=" in line:
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+
+                # Remove quotes if present
+                if value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                elif value.startswith("'") and value.endswith("'"):
+                    value = value[1:-1]
+
+                # Only set if not already in environment
+                if key and key not in os.environ:
+                    os.environ[key] = value
+                    loaded_count += 1
+
+    print(f"✓ Loaded {loaded_count} environment variables")
+    return True
+
+
 def cleanup(signum=None, frame=None):
     """Terminate all child processes on exit."""
     print("\n🛑 Shutting down services...")
@@ -55,7 +91,8 @@ def start_fastapi():
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1
+            bufsize=1,
+            env=os.environ  # Pass environment variables to subprocess
         )
         print(f"✓ FastAPI started (PID: {proc.pid})")
         return proc
@@ -81,7 +118,8 @@ def start_streamlit():
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1
+            bufsize=1,
+            env=os.environ  # Pass environment variables to subprocess
         )
         print(f"✓ Streamlit started (PID: {proc.pid})")
         return proc
@@ -95,6 +133,9 @@ def main():
     print("=" * 80)
     print("TicketsAnalyzerAI - Local Development Server")
     print("=" * 80)
+
+    # Load .env file if present
+    load_env_file()
 
     # Register signal handlers for cleanup
     signal.signal(signal.SIGINT, cleanup)

@@ -25,6 +25,13 @@ echo "========================================================================"
 echo "TicketsAnalyzerAI - Local Development Server"
 echo "========================================================================"
 
+# Load .env file if present
+if [ -f ".env" ]; then
+    echo "📋 Loading environment from .env..."
+    export $(cat .env | grep -v '^#' | grep -v '^$' | xargs)
+    echo "✓ Environment variables loaded"
+fi
+
 # Start FastAPI (optional)
 if [ -f "service_webhook.py" ]; then
     echo "🚀 Starting FastAPI webhook service on $FASTAPI_HOST:$FASTAPI_PORT..."
