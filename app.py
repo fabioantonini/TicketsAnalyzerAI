@@ -3352,30 +3352,18 @@ def _md_to_plaintext(md: str) -> str:
     return text.strip()
 
 def _normalize_soft_numbered_lists(md: str) -> str:
+    """Convert soft numbered lists (e.g. '1 item') to hard format ('1. item')."""
     import re
     lines = md.splitlines()
     out = []
-    run = 0
     for ln in lines:
+        # If line starts with "number + space + non-space" but NOT "number + dot + space"
         if re.match(r"^\s*\d+\s+\S", ln) and not re.match(r"^\s*\d+\.\s+\S", ln):
-            run += 1
+            # Convert "1 text" to "1. text"
+            out.append(re.sub(r"^(\s*\d+)\s+", r"\1. ", ln))
         else:
-            run = 0
-        out.append(ln)
-    # second pass: if there is a run of >=2 lines, convert those lines
-    out2 = []
-    run = 0
-    for ln in out:
-        if re.match(r"^\s*\d+\s+\S", ln) and not re.match(r"^\s*\d+\.\s+\S", ln):
-            run += 1
-            if run >= 2:
-                out2.append(re.sub(r"^(\s*\d+)\s+", r"\1. ", ln))
-            else:
-                out2.append(ln)
-        else:
-            run = 0
-            out2.append(ln)
-    return "\n".join(out2)
+            out.append(ln)
+    return "\n".join(out)
 
 def _md_split_blocks(md: str):
     """Split Markdown into blocks: heading, list, code, paragraph.
