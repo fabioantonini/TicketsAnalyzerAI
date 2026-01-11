@@ -26,8 +26,8 @@ COPY mcp_prompts.json ./
 COPY README.md ./
 COPY start_docker.sh ./
 
-# Make startup script executable
-RUN chmod +x start_docker.sh
+# Convert line endings to LF (in case CRLF from Windows) and make executable
+RUN sed -i 's/\r$//' start_docker.sh && chmod +x start_docker.sh
 
 # Expose ports (Streamlit + FastAPI)
 EXPOSE 8501 8010
