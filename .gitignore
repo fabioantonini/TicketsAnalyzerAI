@@ -212,3 +212,9 @@ data_docker/
 
 # prefs
 .app_prefs.json
+
+# Project-specific
+.taai_projects.json
+improvements-poc.txt
+projects/
+mcp_prompts.json.backup
