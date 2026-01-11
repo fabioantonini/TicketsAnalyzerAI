@@ -1,22 +1,62 @@
+# ===============================
 # Core app
+# ===============================
 streamlit==1.38.0
 requests>=2.31.0
-pandas>=2.2.2
-chromadb>=0.4.22,<0.5
 
-# Cloud LLM
+# ===============================
+# Numeric stack (CRITICAL)
+# ===============================
+numpy==1.26.4
+pandas>=2.2.2,<2.3
+
+# ===============================
+# Vector DB
+# ===============================
+chromadb==0.4.24
+duckdb>=0.9.2
+protobuf<5
+
+# ===============================
+# OpenAI SDK
+# ===============================
 openai>=1.40.0,<2
 tiktoken>=0.7.0
 
-# Embeddings/LLM locali (solo ambiente locale)
-sentence-transformers>=2.7.0
-# torch verrà risolta come dipendenza; se serve pin manuale:
-# torch>=2.3.0; platform_system!="Darwin" or platform_machine!="arm64"
-
-# Ollama client CLI (opzionale; non installabile su Streamlit Cloud)
+# ===============================
+# Local embeddings / LLM
+# (LOCAL ONLY – DO NOT USE ON STREAMLIT CLOUD)
+# ===============================
+sentence-transformers>=2.7.0,<3
 ollama>=0.1.0
 
-# FastAPI per API
-fastapi
-uvicorn  
-pydantic
+# torch viene risolto come dipendenza di sentence-transformers
+# Se hai problemi su Windows, puoi pin esplicitamente:
+# torch>=2.3.0,<3
+
+# ===============================
+# FastAPI stack
+# ===============================
+fastapi>=0.127,<1
+pydantic>=2.11,<3
+uvicorn>=0.23,<1
+
+# ===============================
+# Document parsing
+# ===============================
+PyPDF2>=3.0.1
+python-docx>=1.1.0
+chardet>=5.2.0
+pymupdf>=1.24.0
+pdfplumber>=0.11.0
+
+# ===============================
+# PDF export
+# ===============================
+reportlab>=4.0.8
+markdown>=3.6
+
+# ===============================
+# Utilities
+# ===============================
+tqdm

@@ -26,6 +26,9 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional
 import re
 import shutil, subprocess
+from datetime import datetime
+import io
+import traceback
 
 # NEW (optional): token encoder for precise chunking
 try:
@@ -359,6 +362,7 @@ PHASE_COLORS = {
     "Solutions memory":         "#FFF0F3",  # light pink
     "Chat & Results":           "#E6FAFF",  # light cyan
     "Preferences & debug":      "#F6F6F6",  # neutral grey
+    "Docs KB (PDF/DOCX/TXT)":      "#F0FFF6",  # mint
     "MCP Console":              "#1D0B82",  # dark blue
 }
 
@@ -372,6 +376,7 @@ PHASE_ICONS = {
     "Chat & Results":           "💬",
     "Solutions memory":         "💾",
     "Preferences & debug":      "⚙️",
+    "Docs KB (PDF/DOCX/TXT)":      "📚",
 }
 
 
@@ -2908,6 +2913,9 @@ def run_streamlit_app():
     elif phase == "Preferences & debug":
         render_phase_preferences_debug_page(prefs)
 
+    elif phase == "Docs KB (PDF/DOCX/TXT)":
+        render_phase_docs_kb_page(prefs)
+
     # Close colored container
     phase_container_end()
 
@@ -2922,6 +2930,7 @@ def run_streamlit_app():
             "Chat & Results",
             "Solutions memory",
             "Preferences & debug",
+            "Docs KB (PDF/DOCX/TXT)",
         ]
 
         if "ui_phase_choice" not in st.session_state:
@@ -3203,9 +3212,881 @@ def run_streamlit_app():
             except Exception as e:
                 st.error(f"Connection failed: {e}")
 
+
+# ------------------------------
+# Phase 9 – Docs KB (PDF/DOCX/TXT)
+# ------------------------------
+DOCS_KB_COLLECTION = "docs_kb"
+DOCS_KB_MANIFEST = "docs_kb__manifest.json"
+
+def _docs_manifest_path(persist_dir: str) -> str:
+    return os.path.join(persist_dir, DOCS_KB_MANIFEST)
+
+def _load_docs_manifest(persist_dir: str) -> list:
+    """Load the docs manifest from disk (best-effort)."""
+    try:
+        p = _docs_manifest_path(persist_dir)
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+    except Exception:
+        pass
+    return []
+
+def _save_docs_manifest(persist_dir: str, items: list) -> None:
+    """Persist the docs manifest to disk."""
+    try:
+        os.makedirs(persist_dir, exist_ok=True)
+        p = _docs_manifest_path(persist_dir)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception:
+        # Non-fatal on Cloud ephemeral FS
+        pass
+
+def _sha256_bytes(b: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(b).hexdigest()
+
+def _extract_text_from_pdf_bytes(data: bytes) -> str:
+    """Extract text from PDF using best available backend. No OCR here."""
+    # Try PyMuPDF first (best overall)
+    try:
+        import fitz  # PyMuPDF
+        parts = []
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            for page in doc:
+                t = page.get_text("text") or ""
+                if t.strip():
+                    parts.append(t)
+        txt = "\n".join(parts).strip()
+        if txt:
+            return txt
+    except Exception:
+        pass
+
+    # Fallback: pdfplumber
+    try:
+        import pdfplumber
+        parts = []
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text() or ""
+                if t.strip():
+                    parts.append(t)
+        txt = "\n".join(parts).strip()
+        if txt:
+            return txt
+    except Exception:
+        pass
+
+    # Last resort: PyPDF2
+    from PyPDF2 import PdfReader
+    reader = PdfReader(io.BytesIO(data))
+    parts = []
+    for page in reader.pages:
+        t = page.extract_text() or ""
+        if t.strip():
+            parts.append(t)
+    return "\n".join(parts).strip()
+
+def _extract_text_from_docx_bytes(data: bytes) -> str:
+    """Extract text from DOCX bytes."""
+    from docx import Document
+    doc = Document(io.BytesIO(data))
+    parts = []
+    for p in doc.paragraphs:
+        if p.text and p.text.strip():
+            parts.append(p.text)
+    return "\n".join(parts).strip()
+
+def _extract_text_from_txt_bytes(data: bytes) -> str:
+    """Extract text from TXT bytes with charset detection fallback."""
+    try:
+        return data.decode("utf-8")
+    except Exception:
+        try:
+            import chardet
+            enc = (chardet.detect(data) or {}).get("encoding") or "latin-1"
+            return data.decode(enc, errors="replace")
+        except Exception:
+            return data.decode("latin-1", errors="replace")
+
+def _clean_extracted_text(text: str) -> str:
+    """Light cleanup to improve chunk readability."""
+    import re
+    # Remove control chars (keep \n, \t)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", text)
+    # Normalize spaces
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # De-hyphenate at line breaks
+    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+    return text.strip()
+
+
+def _md_to_plaintext(md: str) -> str:
+    """Best-effort markdown -> plain text for PDF export."""
+    import re
+    if not md:
+        return ""
+    text = md.replace("\r\n", "\n").replace("\r", "\n")
+
+    # code blocks
+    def _code(m):
+        return "\n".join("    " + l for l in m.group(1).splitlines())
+
+    text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)```", _code, text, flags=re.S)
+
+    # headings
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)
+    # bullets
+    text = re.sub(r"^\s*[-*+]\s+", "• ", text, flags=re.M)
+    # bold / italic
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
+    text = re.sub(r"(\*|_)(.*?)\1", r"\2", text)
+    # inline code
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return text.strip()
+
+def _normalize_soft_numbered_lists(md: str) -> str:
+    import re
+    lines = md.splitlines()
+    out = []
+    run = 0
+    for ln in lines:
+        if re.match(r"^\s*\d+\s+\S", ln) and not re.match(r"^\s*\d+\.\s+\S", ln):
+            run += 1
+        else:
+            run = 0
+        out.append(ln)
+    # second pass: if there is a run of >=2 lines, convert those lines
+    out2 = []
+    run = 0
+    for ln in out:
+        if re.match(r"^\s*\d+\s+\S", ln) and not re.match(r"^\s*\d+\.\s+\S", ln):
+            run += 1
+            if run >= 2:
+                out2.append(re.sub(r"^(\s*\d+)\s+", r"\1. ", ln))
+            else:
+                out2.append(ln)
+        else:
+            run = 0
+            out2.append(ln)
+    return "\n".join(out2)
+
+def _md_split_blocks(md: str):
+    """Split Markdown into blocks: heading, list, code, paragraph.
+    Ordered lists are detected ONLY with '1. ' (number + dot).
+    """
+    if not md:
+        return []
+
+    import re
+
+    text = md.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+
+    blocks = []
+    i = 0
+
+    def flush_paragraph(buf):
+        if buf:
+            paragraph = "\n".join(buf).strip()
+            if paragraph:
+                blocks.append({"type": "paragraph", "text": paragraph})
+            buf.clear()
+
+    def parse_list(start_idx):
+        items = []
+        ordered = None
+        j = start_idx
+
+        while j < len(lines):
+            line = lines[j]
+            if not line.strip():
+                break
+
+            # Ordered list ONLY if "1. "
+            m_ord = re.match(r"^\s*(\d+)\.\s+(.*)$", line)
+            # Unordered list: "- ", "* ", "+ "
+            m_un = re.match(r"^\s*[-*+]\s+(.*)$", line)
+
+            if m_ord:
+                if ordered is None:
+                    ordered = True
+                if ordered is False:
+                    break
+                items.append(m_ord.group(2).strip())
+                j += 1
+                continue
+
+            if m_un:
+                if ordered is None:
+                    ordered = False
+                if ordered is True:
+                    break
+                items.append(m_un.group(1).strip())
+                j += 1
+                continue
+
+            break  # not a list anymore
+
+        return {"type": "list", "ordered": bool(ordered), "items": items}, j
+
+    paragraph_buf = []
+
+    while i < len(lines):
+        line = lines[i]
+
+        # Fenced code block
+        if line.strip().startswith("```"):
+            flush_paragraph(paragraph_buf)
+            i += 1
+            code_lines = []
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            if i < len(lines) and lines[i].strip().startswith("```"):
+                i += 1
+            blocks.append({"type": "code", "text": "\n".join(code_lines).rstrip()})
+            continue
+
+        # Heading
+        m_h = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m_h:
+            flush_paragraph(paragraph_buf)
+            level = len(m_h.group(1))
+            blocks.append({
+                "type": "heading",
+                "level": level,
+                "text": m_h.group(2).strip()
+            })
+            i += 1
+            continue
+
+        # List start (STRICT)
+        if re.match(r"^\s*(\d+)\.\s+.*$", line) or re.match(r"^\s*[-*+]\s+.*$", line):
+            flush_paragraph(paragraph_buf)
+            lb, nxt = parse_list(i)
+            if lb["items"]:
+                blocks.append(lb)
+            i = nxt
+            continue
+
+        # Blank line -> paragraph boundary
+        if not line.strip():
+            flush_paragraph(paragraph_buf)
+            i += 1
+            continue
+
+                # Normal para
+
+        paragraph_buf.append(line)
+        i += 1
+
+    flush_paragraph(paragraph_buf)
+    return blocks
+
+def _md_inline_to_rl(text: str) -> str:
+    """Convert minimal Markdown inline (**bold**, *italic*, `code`) to ReportLab-friendly XML-ish markup."""
+    import re
+    from xml.sax.saxutils import escape
+
+    if not text:
+        return ""
+
+    # Escape first (so user content can't break Paragraph markup)
+    s = escape(text)
+
+    # Inline code: `x` -> <font face="Courier">x</font>
+    s = re.sub(r"`([^`]+)`", r'<font face="Courier">\1</font>', s)
+
+    # Bold: **x** or __x__
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+    s = re.sub(r"__(.+?)__", r"<b>\1</b>", s)
+
+    # Italic: *x* or _x_  (avoid clobbering already converted bold tags)
+    s = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", s)
+    s = re.sub(r"_(.+?)_", r"<i>\1</i>", s)
+
+    return s
+
+def export_markdown_to_pdf_structured(md_text: str, title: str | None = None) -> bytes:
+    """Render Markdown to a nicely formatted PDF using ReportLab Platypus.
+    Returns PDF bytes.
+    """
+    import io
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Preformatted, ListFlowable, ListItem
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib import colors
+
+    buf = io.BytesIO()
+
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=2.0 * cm,
+        rightMargin=2.0 * cm,
+        topMargin=1.8 * cm,
+        bottomMargin=1.8 * cm,
+        title=title or "Answer",
+    )
+
+    styles = getSampleStyleSheet()
+
+    # Custom styles
+    normal = styles["Normal"]
+    normal.leading = 14
+
+    h1 = ParagraphStyle("H1", parent=styles["Heading1"], spaceAfter=10, spaceBefore=8)
+    h2 = ParagraphStyle("H2", parent=styles["Heading2"], spaceAfter=8, spaceBefore=8)
+    h3 = ParagraphStyle("H3", parent=styles["Heading3"], spaceAfter=6, spaceBefore=8)
+
+    code_style = ParagraphStyle(
+        "CodeBlock",
+        parent=styles["Code"],
+        fontName="Courier",
+        fontSize=9.5,
+        leading=12,
+        spaceBefore=6,
+        spaceAfter=10,
+        leftIndent=6,
+        rightIndent=6,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+    )
+
+    story = []
+
+    if title:
+        story.append(Paragraph(_md_inline_to_rl(title), h1))
+        story.append(Spacer(1, 0.2 * cm))
+
+    md_text = _normalize_soft_numbered_lists(md_text)
+    blocks = _md_split_blocks(md_text)
+
+    for b in blocks:
+        btype = b["type"]
+
+        if btype == "heading":
+            level = b.get("level", 2)
+            txt = _md_inline_to_rl(b.get("text", ""))
+            if level <= 1:
+                story.append(Paragraph(txt, h1))
+            elif level == 2:
+                story.append(Paragraph(txt, h2))
+            else:
+                story.append(Paragraph(txt, h3))
+            continue
+
+        if btype == "paragraph":
+            txt = _md_inline_to_rl(b.get("text", ""))
+            story.append(Paragraph(txt, normal))
+            story.append(Spacer(1, 0.25 * cm))
+            continue
+
+        if btype == "list":
+            items = b.get("items", [])
+            ordered = bool(b.get("ordered", False))
+            if not items:
+                continue
+
+            list_items = []
+            for it in items:
+                p = Paragraph(_md_inline_to_rl(it), normal)
+                list_items.append(ListItem(p))
+
+            lf = ListFlowable(
+                list_items,
+                bulletType=("1" if ordered else "bullet"),
+                start="1",
+                bulletFormat="%s." if ordered else None,  # <-- aggiungi
+                leftIndent=16,
+                bulletIndent=6,
+                spaceBefore=2,
+                spaceAfter=8,
+            )
+
+            story.append(lf)
+            continue
+
+        if btype == "code":
+            code_text = b.get("text", "")
+            if code_text.strip():
+                story.append(Preformatted(code_text, code_style))
+            continue
+
+    if not story:
+        story.append(Paragraph("No content to export.", normal))
+
+    doc.build(story)
+    return buf.getvalue()
+
+def _render_download_pdf(answer_text: str, filename: str = "answer.pdf", title: str | None = None):
+    """On-demand PDF export (prevents Streamlit from re-generating PDF on every rerun)."""
+    import streamlit as st
+    import hashlib
+
+    if not (answer_text or "").strip():
+        st.warning("No answer to export.")
+        return
+
+    # Stable cache key per (answer_text, title, filename)
+    h = hashlib.sha256((str(title) + "\n" + filename + "\n" + answer_text).encode("utf-8", errors="ignore")).hexdigest()[:16]
+    cache_key = f"docs_kb_pdf_bytes__{h}"
+
+    c1, c2 = st.columns([0.25, 0.75])
+    with c1:
+        gen = st.button("Generate PDF", key=f"{cache_key}__gen")
+
+    if gen:
+        try:
+            with st.spinner("Generating PDF…"):
+                st.session_state[cache_key] = export_markdown_to_pdf_structured(answer_text, title=title)
+            st.success("PDF generated.")
+        except Exception as e:
+            st.error(f"PDF export failed: {e}")
+            import traceback
+            st.code(traceback.format_exc(), language="text")
+            return
+
+    pdf_bytes = st.session_state.get(cache_key)
+    if isinstance(pdf_bytes, (bytes, bytearray)) and pdf_bytes:
+        with c2:
+            st.download_button(
+                "Download answer as PDF",
+                data=pdf_bytes,
+                file_name=filename,
+                mime="application/pdf",
+                key=f"{cache_key}__dl",
+            )
+    else:
+        with c2:
+            st.caption("Click **Generate PDF** to prepare the downloadable file.")
+
+def _build_docs_prompt(question: str, retrieved: list) -> tuple[str, str]:
+    """
+    Build (system, user) prompts for Docs KB RAG.
+    retrieved: list of (doc_text, meta, dist)
+    """
+    system = (
+        "You are a technical assistant for a networking device CLI documentation.\n"
+        "Use ONLY the provided context. If the context is insufficient, say so.\n"
+        "When possible, provide exact CLI commands as code blocks and concise explanations.\n"
+        "Always include a short 'Sources' section with file names (and page/section if available)."
+    )
+
+    context_lines = []
+    sources = []
+    for i, (txt, meta, dist) in enumerate(retrieved, start=1):
+        meta = meta or {}
+        fname = meta.get("source_file") or meta.get("filename") or "document"
+        heading = meta.get("heading_path") or meta.get("section") or ""
+        page = meta.get("page") or meta.get("page_range") or ""
+        chunk_id = meta.get("chunk_id")
+        src = f"{fname}"
+        if page:
+            src += f" (page {page})"
+        if heading:
+            src += f" — {heading}"
+        if chunk_id is not None:
+            src += f" — chunk {chunk_id}"
+        sources.append(src)
+
+        context_lines.append(f"[CONTEXT {i}] SOURCE: {src}\n{txt}\n")
+
+    user = (
+        f"Question:\n{question.strip()}\n\n"
+        "Context:\n"
+        + "\n".join(context_lines)
+        + "\n"
+        "Instructions:\n"
+        "- Answer in Italian.\n"
+        "- Provide 1–3 concrete CLI examples if relevant.\n"
+        "- Keep it readable (bullets are fine).\n"
+        "- End with 'Sources:' listing the sources used.\n"
+    )
+    return system, user
+
+def render_phase_docs_kb_page(prefs):
+    import streamlit as st
+
+    # Normalize prefs
+    prefs_dict = prefs if isinstance(prefs, dict) else st.session_state.get("prefs", {})
+
+    st.title("Phase 9 – Docs KB (PDF/DOCX/TXT)")
+    st.write(
+        "Upload PDF/DOCX/TXT documentation, index it into a dedicated vector DB collection, "
+        "and ask questions using the same LLM configured in Phase 5."
+    )
+    st.markdown(
+        """
+**Formatting rules (used for PDF export):**
+- Use valid Markdown headings (`##`, `###`).
+- If you create ordered lists, always use `1. item` (number + dot).
+- Put CLI commands in fenced code blocks (```shell ... ```).
+- End with a **Sources** section listing `filename` + `chunk ids`.
+"""
+    )
+
+    st.markdown("---")
+
+    # Resolve persist dir
+    persist_dir = (
+        st.session_state.get("vs_persist_dir")
+        or st.session_state.get("persist_dir")
+        or prefs_dict.get("persist_dir", DEFAULT_CHROMA_DIR)
+    )
+    os.makedirs(persist_dir, exist_ok=True)
+
+    # Retrieval/Chunking params from Phase 4
+    max_distance = float(st.session_state.get("max_distance", prefs_dict.get("max_distance", 0.9)))
+    enable_chunking = bool(st.session_state.get("enable_chunking", prefs_dict.get("enable_chunking", True)))
+    chunk_size = int(st.session_state.get("chunk_size", prefs_dict.get("chunk_size", 800)))
+    chunk_overlap = int(st.session_state.get("chunk_overlap", prefs_dict.get("chunk_overlap", 80)))
+    chunk_min = int(st.session_state.get("chunk_min", prefs_dict.get("chunk_min", 512)))
+    top_k = int(st.session_state.get("top_k", prefs_dict.get("top_k", 5)))
+    show_distances = bool(st.session_state.get("show_distances", prefs_dict.get("show_distances", False)))
+
+    # Embedding/LLM config from Phase 5
+    emb_backend = st.session_state.get("emb_provider_select", prefs_dict.get("emb_backend", "OpenAI"))
+    emb_model_name = st.session_state.get("emb_model", prefs_dict.get("emb_model_name", "text-embedding-3-small"))
+
+    llm_provider = st.session_state.get("llm_provider_select", prefs_dict.get("llm_provider", "OpenAI"))
+    llm_model = (st.session_state.get("llm_model") or "").strip() or (DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
+    llm_temperature = float(st.session_state.get("llm_temperature", prefs_dict.get("llm_temperature", 0.2)))
+
+    # Ensure collection exists
+    try:
+        kb_coll = load_chroma_collection(persist_dir, DOCS_KB_COLLECTION, space="cosine")
+    except Exception as e:
+        st.error(f"Unable to open Docs KB collection: {e}")
+        return
+
+    # -----------------------------
+    # 1) Upload + Index
+    # -----------------------------
+    st.subheader("1) Upload & index documents")
+
+    uploaded = st.file_uploader(
+        "Upload PDF/DOCX/TXT",
+        type=["pdf", "docx", "txt"],
+        accept_multiple_files=True,
+    )
+
+    c_idx1, c_idx2 = st.columns([0.7, 0.3])
+    with c_idx1:
+        do_index = st.button("Index uploaded documents", disabled=not uploaded)
+    with c_idx2:
+        st.caption(f"Collection: `{DOCS_KB_COLLECTION}`")
+        st.caption(f"Path: `{persist_dir}`")
+
+    if do_index and uploaded:
+        failures = 0
+        added_chunks = 0
+
+        # Build/embedder (reuse global session object)
+        try:
+            if st.session_state.get("embedder") is None:
+                use_openai_embeddings = (emb_backend == "OpenAI")
+                st.session_state["embedder"] = EmbeddingBackend(
+                    use_openai=use_openai_embeddings,
+                    model_name=emb_model_name,
+                )
+        except Exception as e:
+            st.error(f"Embedding backend init error: {e}")
+            return
+
+        manifest = _load_docs_manifest(persist_dir)
+        known_ids = set((it.get("doc_id") for it in manifest if isinstance(it, dict)))
+
+        for uf in uploaded:
+            try:
+                data = uf.getvalue()
+                doc_id = _sha256_bytes(data)[:16]
+                if doc_id in known_ids:
+                    st.info(f"Skipped (already indexed): {uf.name}")
+                    continue
+
+                ext = (uf.name.split(".")[-1] or "").lower()
+                if ext == "pdf":
+                    raw_text = _extract_text_from_pdf_bytes(data)
+                elif ext == "docx":
+                    raw_text = _extract_text_from_docx_bytes(data)
+                else:
+                    raw_text = _extract_text_from_txt_bytes(data)
+
+                raw_text = _clean_extracted_text(raw_text)
+                if not raw_text.strip():
+                    raise RuntimeError("No extractable text found (is it scanned or empty?).")
+
+                # Chunking (reuse existing splitter)
+                if enable_chunking:
+                    chunks = split_into_chunks(
+                        raw_text,
+                        chunk_size=int(chunk_size),
+                        overlap=int(chunk_overlap),
+                        min_size=int(chunk_min),
+                    )
+                else:
+                    chunks = [(0, raw_text)]
+
+                if not chunks:
+                    chunks = [(0, raw_text)]
+
+                ids = []
+                docs = []
+                metas = []
+                embed_inputs = []
+
+                multi = len(chunks) > 1
+                for i, (pos0, chunk_text) in enumerate(chunks, start=1):
+                    cid = f"{doc_id}::c{i:03d}" if multi else doc_id
+                    ids.append(cid)
+                    docs.append(chunk_text)
+
+                    meta = {
+                        "doc_id": doc_id,
+                        "source_file": uf.name,
+                        "doc_type": ext,
+                    }
+                    if multi:
+                        meta["chunk_id"] = i
+                        meta["pos"] = int(pos0)
+
+                    metas.append(meta)
+                    # Extra prefix helps retrieval for "command-like" questions
+                    embed_inputs.append(f"{uf.name}\n\n{chunk_text}")
+
+                with st.spinner(f"Embedding {uf.name} ({len(ids)} chunks)…"):
+                    embs = st.session_state["embedder"].embed(embed_inputs)
+                    kb_coll.add(ids=ids, documents=docs, metadatas=metas, embeddings=embs)
+
+                manifest.append(
+                    {
+                        "doc_id": doc_id,
+                        "filename": uf.name,
+                        "doc_type": ext,
+                        "bytes": len(data),
+                        "chunks": len(ids),
+                        "indexed_at": int(time.time()),
+                    }
+                )
+                known_ids.add(doc_id)
+                added_chunks += len(ids)
+                st.success(f"Indexed: {uf.name} — chunks: {len(ids)}")
+
+            except Exception as e:
+                failures += 1
+                st.error(f"Indexing failed for {getattr(uf, 'name', 'file')}: {e}")
+                with st.expander("Traceback"):
+                    st.code(traceback.format_exc(), language="text")
+
+        _save_docs_manifest(persist_dir, manifest)
+
+        if failures == 0:
+            st.success(f"Indexing completed. Added chunks: {added_chunks}")
+            st.session_state["ui_phase_choice"] = "Docs KB (PDF/DOCX/TXT)"
+            st.rerun()
+        else:
+            st.warning(f"Indexing completed with {failures} failure(s).")
+
+    st.markdown("---")
+
+    # -----------------------------
+    # 2) Manage documents (list + delete)
+    # -----------------------------
+    st.subheader("2) Indexed documents")
+    manifest = _load_docs_manifest(persist_dir)
+
+    if not manifest:
+        st.caption("No documents indexed yet.")
+    else:
+        for it in list(manifest):
+            doc_id = it.get("doc_id")
+            fname = it.get("filename", "document")
+            chunks_n = it.get("chunks", "?")
+            size_b = it.get("bytes", 0)
+            when = it.get("indexed_at", 0)
+            when_s = datetime.fromtimestamp(int(when)).strftime("%Y-%m-%d %H:%M") if when else "—"
+
+            col_main, col_del = st.columns([0.86, 0.14])
+            with col_main:
+                st.markdown(f"**{fname}**")
+                st.caption(f"doc_id={doc_id} · chunks={chunks_n} · size={size_b} bytes · indexed={when_s}")
+            with col_del:
+                confirm = st.checkbox("confirm", key=f"docs_del_confirm_{doc_id}")
+                if st.button("🗑️ remove", key=f"docs_del_{doc_id}", disabled=not confirm):
+                    try:
+                        kb_coll.delete(where={"doc_id": doc_id})
+                        manifest = [x for x in manifest if x.get("doc_id") != doc_id]
+                        _save_docs_manifest(persist_dir, manifest)
+                        st.success(f"Removed: {fname}")
+                        st.session_state["ui_phase_choice"] = "Docs KB (PDF/DOCX/TXT)"
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
+                        with st.expander("Traceback"):
+                            st.code(traceback.format_exc(), language="text")
+
+    st.markdown("---")
+
+    # -----------------------------
+    # 3) Ask questions (Retrieval + LLM)
+    # -----------------------------
+    st.subheader("3) Ask the Docs KB (RAG)")
+
+    q = st.text_area(
+        "Question",
+        height=120,
+        placeholder="Es: Come configuro RPKI? Fammi un esempio di set/show e spiega i parametri.",
+    )
+
+    c_q1, c_q2, c_q3 = st.columns([0.25, 0.25, 0.5])
+    with c_q1:
+        use_llm = st.checkbox("Use LLM to answer", value=True)
+    with c_q2:
+        nres = st.number_input("Top K", min_value=1, max_value=20, step=1, value=int(top_k))
+    with c_q3:
+        run = st.button("Search in Docs KB")
+
+    if run:
+        if not q.strip():
+            st.error("Please enter a question.")
+            return
+
+        # Ensure embedder exists
+        try:
+            if st.session_state.get("embedder") is None:
+                use_openai_embeddings = (emb_backend == "OpenAI")
+                st.session_state["embedder"] = EmbeddingBackend(
+                    use_openai=use_openai_embeddings,
+                    model_name=emb_model_name,
+                )
+        except Exception as e:
+            st.error(f"Embedding backend init error: {e}")
+            return
+
+        try:
+            q_emb = st.session_state["embedder"].embed([q.strip()])[0]
+            res = kb_coll.query(query_embeddings=[q_emb], n_results=int(nres))
+            docs = (res.get("documents") or [[]])[0]
+            metas = (res.get("metadatas") or [[]])[0]
+            dists = (res.get("distances") or [[]])[0]
+
+            retrieved = []
+            for doc, meta, dist in zip(docs, metas, dists):
+                if dist is None:
+                    continue
+                if dist <= max_distance:
+                    retrieved.append((doc, meta or {}, float(dist)))
+
+            if not retrieved:
+                st.warning("No relevant chunks found under the current distance threshold.")
+                return
+
+            st.session_state["docs_kb_last_retrieved"] = retrieved
+            st.session_state["docs_kb_last_query"] = q.strip()
+
+            # Show retrieved chunks
+            with st.expander("Retrieved chunks", expanded=False):
+                for i, (doc, meta, dist) in enumerate(retrieved, start=1):
+                    fname = meta.get("source_file") or "document"
+                    cid = meta.get("chunk_id")
+                    pos = meta.get("pos")
+                    hdr = f"{i}. {fname}"
+                    if cid is not None:
+                        hdr += f" — chunk {cid}"
+                    st.markdown(hdr)
+                    if show_distances:
+                        st.caption(f"distance={dist:.4f} (max={max_distance})")
+                    if pos is not None:
+                        st.caption(f"offset={pos}")
+                    st.code(doc, language="text")
+
+            if not use_llm:
+                st.info("LLM disabled: showing retrieved chunks only.")
+                return
+
+            # Build prompt + call LLM
+            system, user = _build_docs_prompt(q.strip(), retrieved)
+            format_rules = (
+                "Formatting rules:\n"
+                "- Use valid Markdown headings (##, ###).\n"
+                "- If you create ordered lists, ALWAYS use '1. item' (number + dot).\n"
+                "- Do NOT use '1 item' without the dot.\n"
+                "- Put CLI commands in fenced code blocks using ```shell ... ```.\n"
+                "- End with a 'Sources' section listing filename + chunk ids.\n"
+            )
+            system = (system or "") + "\n\n" + format_rules
+
+            llm = LLMBackend(llm_provider, llm_model, temperature=llm_temperature)
+
+            with st.spinner("Generating answer with LLM…"):
+                answer = llm.generate(system, user).strip()
+
+            st.session_state["docs_kb_last_answer"] = answer
+            st.success("Answer generated. See section '4) Last answer' below.")
+
+
+        except Exception as e:
+            st.error(f"Docs KB query error: {e}")
+            with st.expander("Traceback"):
+                st.code(traceback.format_exc(), language="text")
+
 # ------------------------------
 # CLI + Self-tests (optional)
 # ------------------------------
+
+    # -----------------------------
+    # 4) Last answer (persistent across reruns)
+    # -----------------------------
+    last_q = st.session_state.get("docs_kb_last_query", "")
+    last_answer = st.session_state.get("docs_kb_last_answer", "")
+    last_retrieved = st.session_state.get("docs_kb_last_retrieved", [])
+
+    if last_answer:
+        st.markdown("---")
+        st.subheader("4) Last answer")
+
+        if last_q:
+            st.caption(f"Question: {last_q}")
+
+        st.markdown(last_answer)
+
+        with st.expander("Retrieved chunks (last run)", expanded=False):
+            for i, (doc, meta, dist) in enumerate(last_retrieved, start=1):
+                meta = meta or {}
+                fname = meta.get("source_file") or "document"
+                cid = meta.get("chunk_id")
+                pos = meta.get("pos")
+
+                hdr = f"{i}. {fname}"
+                if cid is not None:
+                    hdr += f" — chunk {cid}"
+                st.markdown(hdr)
+
+                if show_distances:
+                    st.caption(f"distance={dist:.4f} (max={max_distance})")
+                if pos is not None:
+                    st.caption(f"offset={pos}")
+
+                st.code(doc, language="text")
+
+        st.subheader("Export")
+        _render_download_pdf(
+            last_answer,
+            filename="docs_kb_answer.pdf",
+            title=f"Docs KB Answer – {last_q[:60]}" if last_q else "Docs KB Answer",
+        )
+
+
 def _cli_help():
     print("Usage: streamlit run app.py --server.port 8502")
 
@@ -3257,3 +4138,7 @@ if __name__ == "__main__":
     else:
         _cli_help()
         _self_tests()
+
+
+def generate_pdf(answer_text: str, filename: str = "answer.pdf"):
+    return _render_download_pdf(answer_text, filename)
