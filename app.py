@@ -582,9 +582,62 @@ class EmbeddingBackend:
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         print(f"[DEBUG] embed {len(texts)} text with provider={self.provider_name} model={self.model_name}")
+                # NOTE: OpenAI Embeddings API has a max *tokens per request* limit (e.g. 300k).
+        # When indexing large docs we may generate many chunks; sending them in one call can exceed the limit.
+        # We therefore batch inputs to stay safely under the limit.
         if self.use_openai:
-            res = self.client.embeddings.create(model=self.model_name, input=texts)
-            return [d.embedding for d in res.data]  # type: ignore
+            # Conservative safety margin under the hard cap (300000)
+            MAX_TOKENS_PER_REQUEST = int(os.getenv("OPENAI_EMBED_MAX_TOKENS_PER_REQUEST", "290000"))
+            # Also avoid extremely large single inputs (model-dependent). Use a conservative cap.
+            MAX_TOKENS_PER_INPUT = int(os.getenv("OPENAI_EMBED_MAX_TOKENS_PER_INPUT", "8000"))
+
+            def count_tokens(txt: str) -> int:
+                try:
+                    if _tk_enc is not None:
+                        return len(_tk_enc.encode(txt or ""))
+                except Exception:
+                    pass
+                # Fallback heuristic: ~4 chars per token for Latin text
+                return max(1, int(len(txt or "") / 4))
+
+            # If a single item is too large, split it further so we don't fail.
+            expanded: List[str] = []
+            for t in texts:
+                if count_tokens(t) <= MAX_TOKENS_PER_INPUT:
+                    expanded.append(t)
+                    continue
+                # Split oversize items into smaller token windows (no overlap here; overlap is already handled upstream)
+                sub = split_into_chunks(
+                    t,
+                    chunk_size=min(2000, MAX_TOKENS_PER_INPUT // 2),
+                    overlap=0,
+                    min_size=0,
+                )
+                expanded.extend([x[1] for x in sub if x[1]])
+
+            out: List[List[float]] = []
+            batch: List[str] = []
+            batch_tokens = 0
+            def flush():
+                nonlocal batch, batch_tokens, out
+                if not batch:
+                    return
+                res = self.client.embeddings.create(model=self.model_name, input=batch)
+                out.extend([d.embedding for d in res.data])  # type: ignore
+                batch = []
+                batch_tokens = 0
+
+            for t in expanded:
+                t_tokens = count_tokens(t)
+                # If adding this text would exceed the cap, flush first
+                if batch and (batch_tokens + t_tokens) > MAX_TOKENS_PER_REQUEST:
+                    flush()
+                batch.append(t)
+                batch_tokens += t_tokens
+
+            flush()
+            return out
+
         return self.model.encode(texts, normalize_embeddings=True).tolist()  # type: ignore
 
 def get_chroma_client(persist_dir: str):
@@ -3918,7 +3971,7 @@ def render_phase_docs_kb_page(prefs):
 
                     metas.append(meta)
                     # Extra prefix helps retrieval for "command-like" questions
-                    embed_inputs.append(f"{uf.name}\n\n{chunk_text}")
+                    embed_inputs.append(f"{chunk_text}")
 
                 with st.spinner(f"Embedding {uf.name} ({len(ids)} chunks)…"):
                     embs = st.session_state["embedder"].embed(embed_inputs)
