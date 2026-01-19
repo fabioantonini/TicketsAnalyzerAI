@@ -3607,21 +3607,32 @@ def _md_inline_to_rl(text: str) -> str:
     if not text:
         return ""
 
-    # Escape first (so user content can't break Paragraph markup)
-    s = escape(text)
+    # IMPORTANT: protect inline code spans from emphasis parsing.
+    # Otherwise underscores inside code (e.g. <IP_SORGENTE>) can be misread as italics,
+    # producing broken XML-like markup that ReportLab cannot parse.
+    parts = re.split(r"`([^`]+)`", text)
+    out: list[str] = []
 
-    # Inline code: `x` -> <font face="Courier">x</font>
-    s = re.sub(r"`([^`]+)`", r'<font face="Courier">\1</font>', s)
+    def fmt_non_code(seg: str) -> str:
+        s = escape(seg)
+        # Bold: **x** or __x__
+        s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+        s = re.sub(r"__(.+?)__", r"<b>\1</b>", s)
+        # Italic: *x* or _x_
+        s = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", s)
+        s = re.sub(r"_(.+?)_", r"<i>\1</i>", s)
+        return s
 
-    # Bold: **x** or __x__
-    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
-    s = re.sub(r"__(.+?)__", r"<b>\1</b>", s)
+    for i, seg in enumerate(parts):
+        if i % 2 == 0:
+            out.append(fmt_non_code(seg))
+        else:
+            code = escape(seg)
+            # Extra safety: prevent any downstream underscore-based styling.
+            code = code.replace("_", "&#95;")
+            out.append(f'<font face="Courier">{code}</font>')
 
-    # Italic: *x* or _x_  (avoid clobbering already converted bold tags)
-    s = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", s)
-    s = re.sub(r"_(.+?)_", r"<i>\1</i>", s)
-
-    return s
+    return "".join(out)
 
 def export_markdown_to_pdf_structured(md_text: str, title: str | None = None) -> bytes:
     """Render Markdown to a nicely formatted PDF using ReportLab Platypus.
@@ -4189,10 +4200,14 @@ def render_phase_docs_kb_page(prefs):
                 st.code(doc, language="text")
 
         st.subheader("Export")
+        q_one_line = re.sub(r"\s+", " ", (last_q or "")).strip()
+        pdf_body = last_answer
+        if q_one_line:
+            pdf_body = f"Question:\n{q_one_line}\n\n---\n\n{last_answer}"
         _render_download_pdf(
-            last_answer,
+            pdf_body,
             filename="docs_kb_answer.pdf",
-            title=f"Docs KB Answer – {last_q[:60]}" if last_q else "Docs KB Answer",
+            title="Docs KB Answer",
         )
 
 
