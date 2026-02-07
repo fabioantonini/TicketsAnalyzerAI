@@ -1334,6 +1334,21 @@ def render_phase_embeddings_vectordb_page(prefs):
         prefs_dict.get("new_collection_name", DEFAULT_COLLECTION),
     )
 
+    # Embeddings prefs (provider/model)
+    init_state(
+        "emb_provider_select",
+        prefs_dict.get("emb_backend", "OpenAI"),
+    )
+    # Keep a stable previous backend marker for provider-change detection
+    init_state(
+        "_prev_emb_backend", 
+        st.session_state.get("emb_provider_select")
+    )
+    init_state(
+        "emb_model",
+        prefs_dict.get("emb_model_name", ""),
+    )
+
     # -----------------------------
     # 1) Header + success message
     # -----------------------------
@@ -1597,6 +1612,18 @@ def render_phase_embeddings_vectordb_page(prefs):
         index=emb_model_options.index(st.session_state["emb_model"]),
         key="emb_model",
     )
+
+    # Persist embeddings preferences to sticky prefs so that they survive page navigation / app reruns
+    try:
+        prefs_in_state = st.session_state.get("prefs", {})
+        if prefs_in_state.get("emb_backend") != emb_backend:
+            prefs_in_state["emb_backend"] = emb_backend
+        if prefs_in_state.get("emb_model_name") != emb_model_name:
+            prefs_in_state["emb_model_name"] = emb_model_name
+        st.session_state["prefs"] = prefs_in_state
+        save_prefs(prefs_in_state)
+    except Exception:
+        pass
 
     # -----------------------------
     # 9) Vector DB indexing
