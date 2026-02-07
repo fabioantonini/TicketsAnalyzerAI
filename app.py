@@ -3955,6 +3955,20 @@ def render_phase_docs_kb_page(prefs):
     llm_model = (st.session_state.get("llm_model") or "").strip() or (DEFAULT_LLM_MODEL if llm_provider == "OpenAI" else DEFAULT_OLLAMA_MODEL)
     llm_temperature = float(st.session_state.get("llm_temperature", prefs_dict.get("llm_temperature", 0.2)))
 
+    # -----------------------------
+    # Active models (inherited from Phase 3 & Phase 5)
+    # -----------------------------
+    with st.expander("Active models used in Phase 9", expanded=False):
+        st.caption(
+            f"**Embedding**: {emb_backend} / {emb_model_name} "
+            "(same as Phase 3 – Embeddings & Vector DB)"
+        )
+        st.caption(
+            f"**LLM**: {llm_provider} / {llm_model} "
+            f"(temperature={llm_temperature}) "
+            "(same as Phase 5 – LLM & API Keys)"
+        )
+
     # Ensure collection exists
     try:
         kb_coll = load_chroma_collection(persist_dir, DOCS_KB_COLLECTION, space="cosine")
