@@ -257,6 +257,23 @@ def is_ollama_available() -> tuple[bool, str]:
         pass
     return False, host
 
+def get_ollama_model_names(ollama_host: str) -> list[str]:
+    """Return a sorted list of Ollama model names from /api/tags."""
+    try:
+        import requests  # lazy import
+        r = requests.get(f"{ollama_host.rstrip('/')}/api/tags", timeout=2)
+        r.raise_for_status()
+        data = r.json() or {}
+        models = data.get("models", []) or []
+        names = []
+        for m in models:
+            name = (m.get("name") or "").strip()
+            if name:
+                names.append(name)
+        return sorted(set(names))
+    except Exception:
+        return []
+
 def _normalize_provider_label(p: str) -> str:
     p = (p or "").strip().lower()
     if "openai" in p:
@@ -2097,9 +2114,38 @@ def render_phase_llm_page(prefs):
     st.session_state["llm_model"] = initial_model
 
     # Now we can safely draw the widget
+    # --- Suggested models (still allow custom typing) ---
+    if "llm_model" not in st.session_state:
+        st.session_state["llm_model"] = initial_model
+
+    suggested_models = [
+        # Keep a short curated list; user can still type any name
+        "llama3.2",
+        "gemma3:1b",
+        "gemma3:4b",
+        "qwen3:4b",
+        "qwen3:8b",
+    ]
+
+    # If Ollama is selected and reachable, merge real models from Ollama /api/tags
+    if st.session_state.get("llm_provider_select") == "Ollama (local)" and ollama_ok and ollama_host:
+        suggested_models = sorted(set(suggested_models + get_ollama_model_names(ollama_host)))
+
+    # A small selector to quickly pick a model name (optional)
+    picked = st.selectbox(
+        "Pick from suggested models (optional)",
+        options=["(keep current)"] + suggested_models,
+        index=0,
+    )
+
+    if picked != "(keep current)":
+        st.session_state["llm_model"] = picked
+
+    # Free text always wins / allows experimenting with any model
     llm_model = st.text_input(
         "LLM model",
-        value=st.session_state["llm_model"]
+        value=st.session_state["llm_model"],
+        help="Type any Ollama model name (e.g., 'gemma3:4b', 'qwen3:8b').",
     )
 
     # Normalize and rewrite into session_state
