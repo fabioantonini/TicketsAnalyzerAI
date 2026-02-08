@@ -598,4 +598,30 @@ If you get schema errors (e.g. from older local DBs), just remove `data_docker/c
 
 ## 8. License
 
-See the `LICENSE` file if present in the repository.  
+## License
+
+TicketsAnalyzerAI is released as open source software under the **GNU Affero General Public License v3.0 (AGPLv3)**.
+
+This means you are free to:
+- use the software internally
+- study and modify the source code
+- self-host the application
+- contribute improvements back to the project
+
+### Commercial use
+
+If you intend to:
+- use TicketsAnalyzerAI as part of a **commercial or proprietary service**
+- offer it as **Software-as-a-Service (SaaS)**
+- integrate it into a **closed-source product**
+- deploy it in environments with **restricted source disclosure**
+
+a **commercial license is required**.
+
+Commercial licenses remove AGPL obligations and include additional benefits such as:
+- proprietary usage rights
+- enterprise-friendly terms
+- optional support and premium features
+
+For commercial licensing, please contact:
+**[fabio.antonini.1969@gmail.com]**  
