@@ -3712,9 +3712,15 @@ def export_markdown_to_pdf_structured(md_text: str, title: str | None = None) ->
     Returns PDF bytes.
     """
     import io
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Preformatted, ListFlowable, ListItem
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import cm
+    try:
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Preformatted, ListFlowable, ListItem
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import cm
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "Missing dependency 'reportlab' required for PDF export. "
+            "Install it with: pip install reportlab"
+        ) from e
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.enums import TA_LEFT
     from reportlab.lib import colors
@@ -3821,6 +3827,50 @@ def export_markdown_to_pdf_structured(md_text: str, title: str | None = None) ->
     doc.build(story)
     return buf.getvalue()
 
+
+def _docs_kb_chat_to_markdown(chat: list) -> str:
+    """Convert Docs KB chat history into a single Markdown transcript for export."""
+    lines: list[str] = []
+    lines.append("## Docs KB Chat Transcript")
+
+    if not isinstance(chat, list) or not chat:
+        lines.append("\n_No messages in chat._")
+        return "\n".join(lines).strip()
+
+    for i, msg in enumerate(chat, start=1):
+        msg = msg or {}
+        role = (msg.get("role") or "assistant").strip().lower()
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+
+        if role == "user":
+            lines.append(f"\n### User ({i})\n{content}\n")
+        else:
+            lines.append(f"\n### Assistant ({i})\n{content}\n")
+
+            retrieved = msg.get("retrieved") or []
+            if retrieved:
+                lines.append("\n#### Sources\n")
+                seen = set()
+                for _doc, meta, _dist in retrieved:
+                    meta = meta or {}
+                    fname = meta.get("source_file") or "document"
+                    cid = meta.get("chunk_id")
+                    key = (fname, cid)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if cid is not None:
+                        lines.append(f"- {fname} — chunk {cid}")
+                    else:
+                        lines.append(f"- {fname}")
+                lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+
 def _render_download_pdf(answer_text: str, filename: str = "answer.pdf", title: str | None = None):
     """On-demand PDF export (prevents Streamlit from re-generating PDF on every rerun)."""
     import streamlit as st
@@ -3863,18 +3913,46 @@ def _render_download_pdf(answer_text: str, filename: str = "answer.pdf", title: 
         with c2:
             st.caption("Click **Generate PDF** to prepare the downloadable file.")
 
-def _build_docs_prompt(question: str, retrieved: list) -> tuple[str, str]:
+def _build_docs_prompt(question: str, retrieved: list, chat_history: list | None = None) -> tuple[str, str]:
     """
     Build (system, user) prompts for Docs KB RAG.
+
     retrieved: list of (doc_text, meta, dist)
+    chat_history: list of dicts like {"role": "user"|"assistant", "content": str}
     """
     system = (
-        "You are a technical assistant for a networking device CLI documentation.\n"
-        "Use ONLY the provided context. If the context is insufficient, say so.\n"
-        "When possible, provide exact CLI commands as code blocks and concise explanations.\n"
-        "Always include a short 'Sources' section with file names (and page/section if available)."
+        "You are a technical assistant for a documentation Knowledge Base (PDF, DOCX, TXT).\n"
+        "The user may ask follow-up questions: keep track of the conversation context to ensure continuity.\n"
+        "Use ONLY the provided retrieved context as a source of factual information.\n"
+        "Conversation history is provided for coherence, but it must NOT be treated as a factual source.\n"
+        "If the retrieved context is insufficient, explicitly say so and ask a clarification question.\n"
+        "Always respond in clear, professional English.\n"
+        "If the question is not about the documentation, politely decline to answer and suggest asking a more relevant question.\n"
     )
 
+
+    # --- Chat history (to keep follow-ups coherent) ---
+    # We include a compact transcript, but we still enforce that factual claims
+    # must be grounded in the retrieved context below.
+    history_lines = []
+    if chat_history:
+        # Keep only the last few turns to avoid prompt bloat
+        tail = chat_history[-8:]
+        for msg in tail:
+            role = (msg or {}).get("role", "")
+            content = (msg or {}).get("content", "")
+            if not content:
+                continue
+            if role == "user":
+                history_lines.append(f"USER: {content.strip()}")
+            elif role == "assistant":
+                history_lines.append(f"ASSISTANT: {content.strip()}")
+
+    history_block = ""
+    if history_lines:
+        history_block = "Chat history (for continuity, do not treat as source of truth):\n" + "\n".join(history_lines) + "\n\n"
+
+    # --- Retrieved context ---
     context_lines = []
     sources = []
     for i, (txt, meta, dist) in enumerate(retrieved, start=1):
@@ -3895,12 +3973,14 @@ def _build_docs_prompt(question: str, retrieved: list) -> tuple[str, str]:
         context_lines.append(f"[CONTEXT {i}] SOURCE: {src}\n{txt}\n")
 
     user = (
+        f"{history_block}"
         f"Question:\n{question.strip()}\n\n"
         "Context:\n"
         + "\n".join(context_lines)
         + "\n"
         "Instructions:\n"
-        "- Answer in Italian.\n"
+        "- Answer in English.\n"
+        "- Treat the chat history as conversational context only; every factual/technical claim must be supported by the retrieved Context above.\n"
         "- Provide 1–3 concrete CLI examples if relevant.\n"
         "- Keep it readable (bullets are fine).\n"
         "- End with 'Sources:' listing the sources used.\n"
@@ -4145,28 +4225,71 @@ def render_phase_docs_kb_page(prefs):
     st.markdown("---")
 
     # -----------------------------
-    # 3) Ask questions (Retrieval + LLM)
+    
     # -----------------------------
-    st.subheader("3) Ask the Docs KB (RAG)")
+    # 3) Chat with the Docs KB (RAG)
+    # -----------------------------
+    st.subheader("3) Chat with the Docs KB (RAG)")
 
-    q = st.text_area(
-        "Question",
-        height=120,
-        placeholder="Es: Come configuro RPKI? Fammi un esempio di set/show e spiega i parametri.",
-    )
+    # Keep Phase stable across reruns (prevents going back to Phase 0 on submit)
+    st.session_state["ui_phase_choice"] = "Docs KB (PDF/DOCX/TXT)"
 
-    c_q1, c_q2, c_q3 = st.columns([0.25, 0.25, 0.5])
-    with c_q1:
+    # Chat state
+    if "docs_kb_chat" not in st.session_state:
+        st.session_state["docs_kb_chat"] = []  # list of {"role": ..., "content": ..., "retrieved": [...]}
+
+    c_chat1, c_chat2 = st.columns([0.75, 0.25])
+    with c_chat1:
+        st.caption("Use follow-up questions: the assistant will keep the conversation context.")
+    with c_chat2:
+        if st.button("Clear chat", use_container_width=True):
+            st.session_state["docs_kb_chat"] = []
+            st.session_state["docs_kb_last_query"] = ""
+            st.session_state["docs_kb_last_answer"] = ""
+            st.session_state["docs_kb_last_retrieved"] = []
+            st.rerun()
+
+    with st.expander("Chat settings", expanded=False):
         use_llm = st.checkbox("Use LLM to answer", value=True)
-    with c_q2:
         nres = st.number_input("Top K", min_value=1, max_value=20, step=1, value=int(top_k))
-    with c_q3:
-        run = st.button("Search in Docs KB")
+        st.caption("Retrieval uses the same distance threshold configured above.")
 
-    if run:
-        if not q.strip():
-            st.error("Please enter a question.")
-            return
+    # Render messages
+    for msg in st.session_state["docs_kb_chat"]:
+        role = (msg or {}).get("role", "assistant")
+        content = (msg or {}).get("content", "")
+        with st.chat_message(role):
+            if role == "assistant":
+                st.markdown(content or "")
+                retrieved = (msg or {}).get("retrieved") or []
+                if retrieved:
+                    with st.expander("Sources / retrieved chunks", expanded=False):
+                        for i, (doc, meta, dist) in enumerate(retrieved, start=1):
+                            meta = meta or {}
+                            fname = meta.get("source_file") or "document"
+                            cid = meta.get("chunk_id")
+                            pos = meta.get("pos")
+                            hdr = f"{i}. {fname}"
+                            if cid is not None:
+                                hdr += f" — chunk {cid}"
+                            st.markdown(hdr)
+                            if show_distances:
+                                st.caption(f"distance={float(dist):.4f} (max={max_distance})")
+                            if pos is not None:
+                                st.caption(f"offset={pos}")
+                            st.code(doc, language="text")
+            else:
+                st.markdown(content or "")
+
+    user_msg = st.chat_input("Ask something about your Docs KB…")
+
+    if user_msg:
+        # Append user message first
+        st.session_state["docs_kb_chat"].append({"role": "user", "content": user_msg.strip()})
+
+        if not user_msg.strip():
+            st.warning("Empty message.")
+            st.rerun()
 
         # Ensure embedder exists
         try:
@@ -4181,7 +4304,14 @@ def render_phase_docs_kb_page(prefs):
             return
 
         try:
-            q_emb = st.session_state["embedder"].embed([q.strip()])[0]
+            # Build a slightly richer retrieval query for follow-ups
+            # (helps when the user says "that command" / "those params", etc.)
+            retrieval_query = user_msg.strip()
+            hist_users = [m.get("content", "") for m in st.session_state["docs_kb_chat"] if m.get("role") == "user"]
+            if len(hist_users) >= 2:
+                retrieval_query = (hist_users[-2].strip() + "\n" + retrieval_query).strip()
+
+            q_emb = st.session_state["embedder"].embed([retrieval_query])[0]
             res = kb_coll.query(query_embeddings=[q_emb], n_results=int(nres))
             docs = (res.get("documents") or [[]])[0]
             metas = (res.get("metadatas") or [[]])[0]
@@ -4191,38 +4321,40 @@ def render_phase_docs_kb_page(prefs):
             for doc, meta, dist in zip(docs, metas, dists):
                 if dist is None:
                     continue
-                if dist <= max_distance:
+                if float(dist) <= max_distance:
                     retrieved.append((doc, meta or {}, float(dist)))
 
             if not retrieved:
-                st.warning("No relevant chunks found under the current distance threshold.")
-                return
+                st.session_state["docs_kb_chat"].append(
+                    {
+                        "role": "assistant",
+                        "content": "Non ho trovato chunk rilevanti con l'attuale soglia di distanza. "
+                                   "Prova ad aumentare Top K o ad alzare la soglia di distanza, oppure riformula la domanda.",
+                        "retrieved": [],
+                    }
+                )
+                st.rerun()
 
+            # Persist "last run" for export
             st.session_state["docs_kb_last_retrieved"] = retrieved
-            st.session_state["docs_kb_last_query"] = q.strip()
-
-            # Show retrieved chunks
-            with st.expander("Retrieved chunks", expanded=False):
-                for i, (doc, meta, dist) in enumerate(retrieved, start=1):
-                    fname = meta.get("source_file") or "document"
-                    cid = meta.get("chunk_id")
-                    pos = meta.get("pos")
-                    hdr = f"{i}. {fname}"
-                    if cid is not None:
-                        hdr += f" — chunk {cid}"
-                    st.markdown(hdr)
-                    if show_distances:
-                        st.caption(f"distance={dist:.4f} (max={max_distance})")
-                    if pos is not None:
-                        st.caption(f"offset={pos}")
-                    st.code(doc, language="text")
+            st.session_state["docs_kb_last_query"] = user_msg.strip()
 
             if not use_llm:
-                st.info("LLM disabled: showing retrieved chunks only.")
-                return
+                st.session_state["docs_kb_chat"].append(
+                    {
+                        "role": "assistant",
+                        "content": "LLM disabilitato: ho mostrato solo i chunk recuperati (vedi expander).",
+                        "retrieved": retrieved,
+                    }
+                )
+                st.rerun()
 
-            # Build prompt + call LLM
-            system, user = _build_docs_prompt(q.strip(), retrieved)
+            # Build prompt + call LLM (include chat history)
+            system, user = _build_docs_prompt(
+                user_msg.strip(),
+                retrieved,
+                chat_history=st.session_state["docs_kb_chat"],
+            )
             format_rules = (
                 "Formatting rules:\n"
                 "- Use valid Markdown headings (##, ###).\n"
@@ -4239,65 +4371,39 @@ def render_phase_docs_kb_page(prefs):
                 answer = llm.generate(system, user).strip()
 
             st.session_state["docs_kb_last_answer"] = answer
-            st.success("Answer generated. See section '4) Last answer' below.")
 
+            st.session_state["docs_kb_chat"].append(
+                {"role": "assistant", "content": answer, "retrieved": retrieved}
+            )
+
+            st.rerun()
 
         except Exception as e:
-            st.error(f"Docs KB query error: {e}")
-            with st.expander("Traceback"):
-                st.code(traceback.format_exc(), language="text")
-
-# ------------------------------
-# CLI + Self-tests (optional)
-# ------------------------------
+            st.session_state["docs_kb_chat"].append(
+                {"role": "assistant", "content": f"Docs KB query error: {e}", "retrieved": []}
+            )
+            st.rerun()
 
     # -----------------------------
-    # 4) Last answer (persistent across reruns)
+    # 4) Export chat transcript (PDF)
     # -----------------------------
-    last_q = st.session_state.get("docs_kb_last_query", "")
+    chat = st.session_state.get("docs_kb_chat", []) or []
     last_answer = st.session_state.get("docs_kb_last_answer", "")
-    last_retrieved = st.session_state.get("docs_kb_last_retrieved", [])
-
-    if last_answer:
+    if chat or (last_answer or "").strip():
         st.markdown("---")
-        st.subheader("4) Last answer")
+        st.subheader("4) Export (full chat)")
 
-        if last_q:
-            st.caption(f"Question: {last_q}")
+        transcript_md = _docs_kb_chat_to_markdown(chat)
 
-        st.markdown(last_answer)
+        # Fallback (should not happen, but keep it safe)
+        if not (transcript_md or "").strip() and (last_answer or "").strip():
+            transcript_md = (last_answer or "").strip()
 
-        with st.expander("Retrieved chunks (last run)", expanded=False):
-            for i, (doc, meta, dist) in enumerate(last_retrieved, start=1):
-                meta = meta or {}
-                fname = meta.get("source_file") or "document"
-                cid = meta.get("chunk_id")
-                pos = meta.get("pos")
-
-                hdr = f"{i}. {fname}"
-                if cid is not None:
-                    hdr += f" — chunk {cid}"
-                st.markdown(hdr)
-
-                if show_distances:
-                    st.caption(f"distance={dist:.4f} (max={max_distance})")
-                if pos is not None:
-                    st.caption(f"offset={pos}")
-
-                st.code(doc, language="text")
-
-        st.subheader("Export")
-        q_one_line = re.sub(r"\s+", " ", (last_q or "")).strip()
-        pdf_body = last_answer
-        if q_one_line:
-            pdf_body = f"Question:\n{q_one_line}\n\n---\n\n{last_answer}"
         _render_download_pdf(
-            pdf_body,
-            filename="docs_kb_answer.pdf",
-            title="Docs KB Answer",
+            transcript_md,
+            filename="docs_kb_chat.pdf",
+            title="Docs KB Chat",
         )
-
-
 def _cli_help():
     print("Usage: streamlit run app.py --server.port 8502")
 
