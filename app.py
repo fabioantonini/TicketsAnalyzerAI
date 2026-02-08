@@ -3827,6 +3827,50 @@ def export_markdown_to_pdf_structured(md_text: str, title: str | None = None) ->
     doc.build(story)
     return buf.getvalue()
 
+
+def _docs_kb_chat_to_markdown(chat: list) -> str:
+    """Convert Docs KB chat history into a single Markdown transcript for export."""
+    lines: list[str] = []
+    lines.append("## Docs KB Chat Transcript")
+
+    if not isinstance(chat, list) or not chat:
+        lines.append("\n_No messages in chat._")
+        return "\n".join(lines).strip()
+
+    for i, msg in enumerate(chat, start=1):
+        msg = msg or {}
+        role = (msg.get("role") or "assistant").strip().lower()
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+
+        if role == "user":
+            lines.append(f"\n### User ({i})\n{content}\n")
+        else:
+            lines.append(f"\n### Assistant ({i})\n{content}\n")
+
+            retrieved = msg.get("retrieved") or []
+            if retrieved:
+                lines.append("\n#### Sources\n")
+                seen = set()
+                for _doc, meta, _dist in retrieved:
+                    meta = meta or {}
+                    fname = meta.get("source_file") or "document"
+                    cid = meta.get("chunk_id")
+                    key = (fname, cid)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if cid is not None:
+                        lines.append(f"- {fname} — chunk {cid}")
+                    else:
+                        lines.append(f"- {fname}")
+                lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+
 def _render_download_pdf(answer_text: str, filename: str = "answer.pdf", title: str | None = None):
     """On-demand PDF export (prevents Streamlit from re-generating PDF on every rerun)."""
     import streamlit as st
@@ -4341,27 +4385,25 @@ def render_phase_docs_kb_page(prefs):
             st.rerun()
 
     # -----------------------------
-    # 4) Export last assistant answer
+    # 4) Export chat transcript (PDF)
     # -----------------------------
+    chat = st.session_state.get("docs_kb_chat", []) or []
     last_answer = st.session_state.get("docs_kb_last_answer", "")
-    last_q = st.session_state.get("docs_kb_last_query", "")
-
-    if last_answer:
+    if chat or (last_answer or "").strip():
         st.markdown("---")
-        st.subheader("4) Export (last answer)")
+        st.subheader("4) Export (full chat)")
 
-        q_one_line = re.sub(r"\s+", " ", (last_q or "")).strip()
-        pdf_body = last_answer
-        if q_one_line:
-            pdf_body = f"Question:\n{q_one_line}\n\n---\n\n{last_answer}"
+        transcript_md = _docs_kb_chat_to_markdown(chat)
+
+        # Fallback (should not happen, but keep it safe)
+        if not (transcript_md or "").strip() and (last_answer or "").strip():
+            transcript_md = (last_answer or "").strip()
 
         _render_download_pdf(
-            pdf_body,
-            filename="docs_kb_answer.pdf",
-            title="Docs KB Answer",
+            transcript_md,
+            filename="docs_kb_chat.pdf",
+            title="Docs KB Chat",
         )
-
-
 def _cli_help():
     print("Usage: streamlit run app.py --server.port 8502")
 
